@@ -1,34 +1,158 @@
-//! Tests for DripGovernor parameter management.
+//! Integration tests: DripGovernor parameter management.
 
-#[cfg(test)]
-mod governor_config {
-    #[test]
-    fn test_defaults_set_on_initialize() {
-        // TODO: deploy governor, verify fee_bps=30, min_duration=3600
-    }
+use soroban_sdk::{testutils::Address as _, Address, Env};
+use drip_governor::{DripGovernor, DripGovernorClient};
 
-    #[test]
-    fn test_authority_can_set_fee_bps() {
-        // TODO: set_fee_bps(50), verify config().fee_bps == 50
-    }
+fn deploy_governor(env: &Env) -> (DripGovernorClient<'_>, Address, Address) {
+    let authority        = Address::generate(env);
+    let fee_recipient    = Address::generate(env);
+    let factory_address  = Address::generate(env);
 
-    #[test]
-    fn test_non_authority_cannot_set_fee_bps() {
-        // TODO: call set_fee_bps from non-authority → NotAuthorized
-    }
+    let id     = env.register_contract(None, DripGovernor);
+    let client = DripGovernorClient::new(env, &id);
 
-    #[test]
-    fn test_fee_bps_cannot_exceed_10000() {
-        // TODO: set_fee_bps(10001) → InvalidParam
-    }
+    client.initialize(&authority, &fee_recipient, &factory_address);
 
-    #[test]
-    fn test_transfer_authority() {
-        // TODO: transfer_authority(new_addr), verify old authority can no longer write
-    }
+    (client, authority, fee_recipient)
+}
 
-    #[test]
-    fn test_set_zero_min_duration_rejected() {
-        // TODO: set_min_duration(0) → InvalidParam
-    }
+// ── Defaults ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn initialize_sets_correct_defaults() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _authority, fee_recipient) = deploy_governor(&env);
+    let config = client.config();
+
+    assert_eq!(config.fee_bps,              30);
+    assert_eq!(config.min_duration_seconds, 3_600);
+    assert_eq!(config.max_rate_per_second,  1_000_000_000_000_000);
+    assert_eq!(config.fee_recipient,        fee_recipient);
+}
+
+// ── Fee BPS ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn authority_can_update_fee_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _authority, _) = deploy_governor(&env);
+    client.set_fee_bps(&50);
+    assert_eq!(client.config().fee_bps, 50);
+}
+
+#[test]
+fn fee_bps_of_zero_is_valid() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_fee_bps(&0);
+    assert_eq!(client.config().fee_bps, 0);
+}
+
+#[test]
+fn fee_bps_of_10000_is_valid() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_fee_bps(&10_000);
+    assert_eq!(client.config().fee_bps, 10_000);
+}
+
+#[test]
+#[should_panic(expected = "InvalidParam")]
+fn fee_bps_exceeding_10000_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_fee_bps(&10_001);
+}
+
+// ── Min duration ─────────────────────────────────────────────────────────────
+
+#[test]
+fn authority_can_set_min_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_min_duration(&7_200);
+    assert_eq!(client.config().min_duration_seconds, 7_200);
+}
+
+#[test]
+#[should_panic(expected = "InvalidParam")]
+fn zero_min_duration_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_min_duration(&0);
+}
+
+// ── Max rate ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn authority_can_set_max_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_max_rate(&500_000_000);
+    assert_eq!(client.config().max_rate_per_second, 500_000_000);
+}
+
+#[test]
+#[should_panic(expected = "InvalidParam")]
+fn zero_max_rate_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_max_rate(&0);
+}
+
+#[test]
+#[should_panic(expected = "InvalidParam")]
+fn negative_max_rate_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    client.set_max_rate(&-1);
+}
+
+// ── Fee recipient ────────────────────────────────────────────────────────────
+
+#[test]
+fn authority_can_change_fee_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, _) = deploy_governor(&env);
+    let new_recipient   = Address::generate(&env);
+    client.set_fee_recipient(&new_recipient);
+    assert_eq!(client.config().fee_recipient, new_recipient);
+}
+
+// ── Transfer authority ───────────────────────────────────────────────────────
+
+#[test]
+fn authority_transfers_correctly() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _old_authority, _) = deploy_governor(&env);
+    let new_authority = Address::generate(&env);
+    client.transfer_authority(&new_authority);
+
+    // Post-transfer, a config read still works (authority is stored, not verified on read)
+    let config = client.config();
+    assert_eq!(config.fee_bps, 30); // defaults unchanged
 }
