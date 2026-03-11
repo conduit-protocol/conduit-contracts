@@ -234,11 +234,105 @@ fn clawback_disabled_panics() {
 #[test]
 fn top_up_increases_contract_balance() {
     let s = Setup::new(100, 3600, false);
-    // Mint extra tokens to sender
     let token_admin = token::StellarAssetClient::new(&s.env, &s.token.address);
     token_admin.mint(&s.sender, &50_000);
 
     let stream_before = s.token.balance(&s.client.address);
     s.client.top_up(&50_000);
     assert_eq!(s.token.balance(&s.client.address), stream_before + 50_000);
+}
+
+#[test]
+fn top_up_on_cancelled_stream_is_rejected() {
+    let s = Setup::new(100, 3600, false);
+    s.client.cancel();
+
+    let token_admin = token::StellarAssetClient::new(&s.env, &s.token.address);
+    token_admin.mint(&s.sender, &10_000);
+
+    let result = s.client.try_top_up(&10_000);
+    assert!(result.is_err());
+}
+
+// ── Cancelled stream state ────────────────────────────────────────────────────
+
+#[test]
+fn withdrawable_returns_zero_after_cancel() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(500);
+    assert!(s.client.withdrawable() > 0);
+
+    s.client.cancel();
+    assert_eq!(s.client.withdrawable(), 0);
+}
+
+#[test]
+fn pause_then_cancel_refunds_correctly() {
+    let s          = Setup::new(100, 3600, false);
+    let deposit    = 100 * 3600; // 360_000
+
+    s.advance_secs(600); // 60_000 streamed
+    s.client.pause();
+    s.advance_secs(1_000); // time passes; not counted
+
+    let sender_before    = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+    s.client.cancel();
+
+    // Recipient should get 60_000 (earned before pause)
+    // Sender should get 360_000 − 60_000 = 300_000
+    assert_eq!(s.token.balance(&s.recipient) - recipient_before, 60_000);
+    assert_eq!(s.token.balance(&s.sender)    - sender_before,    300_000);
+    let _ = deposit; // suppress unused warning
+}
+
+// ── Stream info ───────────────────────────────────────────────────────────────
+
+#[test]
+fn info_returns_correct_initial_state() {
+    let s   = Setup::new(250, 7_200, true);
+    let inf = s.client.info();
+
+    assert_eq!(inf.rate_per_second,  250);
+    assert!(!inf.paused);
+    assert!(!inf.cancelled);
+    assert!(inf.clawback_enabled);
+    assert_eq!(inf.withdrawn, 0);
+}
+
+#[test]
+fn info_reflects_pause_state() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(100);
+    s.client.pause();
+
+    let inf = s.client.info();
+    assert!(inf.paused);
+    assert!(inf.paused_at > 0);
+}
+
+// ── Edge cases ────────────────────────────────────────────────────────────────
+
+#[test]
+fn withdraw_exactly_full_balance_succeeds() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(3600); // end_time reached — full deposit earned
+    let total = 100 * 3600; // 360_000
+
+    let withdrawn = s.client.withdraw(&(total as i128));
+    assert_eq!(withdrawn, total as i128);
+    assert_eq!(s.token.balance(&s.recipient), total as i128);
+}
+
+#[test]
+fn multiple_sequential_withdrawals_sum_correctly() {
+    let s = Setup::new(1_000, 3_600, false);
+    s.advance_secs(900); // 900_000 streamed
+
+    let w1 = s.client.withdraw(&300_000);
+    let w2 = s.client.withdraw(&300_000);
+    let w3 = s.client.withdraw(&300_000);
+
+    assert_eq!(w1 + w2 + w3, 900_000);
+    assert_eq!(s.token.balance(&s.recipient), 900_000);
 }
