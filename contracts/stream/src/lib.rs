@@ -224,6 +224,16 @@ impl DripStream {
         math::withdrawable(&env, &info).unwrap_or(0)
     }
 
+    /// Read-only: total tokens streamed so far (regardless of withdrawals).
+    ///
+    /// Useful for UIs that want to show "X streamed, Y withdrawn, Z remaining"
+    /// without the caller needing to reimplement the rate × elapsed math.
+    pub fn streamed_total(env: Env) -> i128 {
+        let info = load(&env);
+        if info.cancelled { return 0; }
+        math::streamed_amount(&env, &info).unwrap_or(0)
+    }
+
     /// Read-only: full stream state.
     pub fn info(env: Env) -> StreamInfo {
         load(&env)
