@@ -41,3 +41,10 @@ pub fn clawback(env: &Env, sender: &Address, amount: i128) {
         amount,
     );
 }
+
+pub fn recipient_transferred(env: &Env, old_recipient: &Address, new_recipient: &Address) {
+    env.events().publish(
+        (symbol_short!("xfer_rec"), old_recipient.clone()),
+        new_recipient.clone(),
+    );
+}

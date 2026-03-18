@@ -224,6 +224,21 @@ impl DripStream {
         math::withdrawable(&env, &info).unwrap_or(0)
     }
 
+    /// Recipient transfers their right to a new address.
+    ///
+    /// Any withdrawable balance at the moment of transfer stays accessible
+    /// to the new recipient. The sender is intentionally not notified
+    /// on-chain (use events); governance can add a sender-veto in future.
+    pub fn transfer_recipient(env: Env, new_recipient: Address) -> Result<(), Error> {
+        let mut info = load(&env);
+        assert_not_cancelled(&info)?;
+        info.recipient.require_auth();
+
+        env.storage().instance().set(&DataKey::Recipient, &new_recipient);
+        events::recipient_transferred(&env, &info.recipient, &new_recipient);
+        Ok(())
+    }
+
     /// Read-only: total tokens streamed so far (regardless of withdrawals).
     ///
     /// Useful for UIs that want to show "X streamed, Y withdrawn, Z remaining"
