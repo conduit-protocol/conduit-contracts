@@ -78,7 +78,13 @@ The factory validates `deposit >= rate_per_sec` (at least 1 second of streaming)
 
 **Mitigation:** Add validation: if `end_time > 0`, require `deposit >= rate_per_sec × (end_time - start_time)`.
 
-### 5. Clawback can be used adversarially
+### 5. Pause-state attack by sender
+
+A malicious sender can pause a stream indefinitely, blocking further accrual for the recipient while retaining full control of unstreamed tokens. The recipient has no unilateral way to force a resume or cancel.
+
+**Mitigation:** Add a `max_pause_duration` parameter at stream creation, after which the recipient can call `force_cancel()` to settle atomically. This is tracked in [issue #12](https://github.com/conduit-protocol/conduit-contracts/issues/12).
+
+### 6. Clawback can be used adversarially
 
 A sender with `clawback_enabled = true` can call `clawback()` to reclaim all unstreamed tokens at any time, effectively starving the recipient of future payments. Recipients should verify `clawback_enabled` before accepting a stream.
 
