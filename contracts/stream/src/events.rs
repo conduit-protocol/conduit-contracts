@@ -1,6 +1,12 @@
 use soroban_sdk::{symbol_short, Address, Env};
 
-pub fn withdrawn(env: &Env, recipient: &Address, amount: i128, total_withdrawn: i128, remaining: i128) {
+pub fn withdrawn(
+    env: &Env,
+    recipient: &Address,
+    amount: i128,
+    total_withdrawn: i128,
+    remaining: i128,
+) {
     env.events().publish(
         (symbol_short!("withdrawn"), recipient.clone()),
         (amount, total_withdrawn, remaining),
@@ -22,10 +28,8 @@ pub fn paused(env: &Env, sender: &Address, paused_at: u64, withdrawable: i128) {
 }
 
 pub fn resumed(env: &Env, sender: &Address, resumed_at: u64) {
-    env.events().publish(
-        (symbol_short!("resumed"), sender.clone()),
-        resumed_at,
-    );
+    env.events()
+        .publish((symbol_short!("resumed"), sender.clone()), resumed_at);
 }
 
 pub fn topped_up(env: &Env, sender: &Address, amount: i128, new_balance: i128) {
@@ -36,10 +40,8 @@ pub fn topped_up(env: &Env, sender: &Address, amount: i128, new_balance: i128) {
 }
 
 pub fn clawback(env: &Env, sender: &Address, amount: i128) {
-    env.events().publish(
-        (symbol_short!("clawback"), sender.clone()),
-        amount,
-    );
+    env.events()
+        .publish((symbol_short!("clawback"), sender.clone()), amount);
 }
 
 pub fn recipient_transferred(env: &Env, old_recipient: &Address, new_recipient: &Address) {

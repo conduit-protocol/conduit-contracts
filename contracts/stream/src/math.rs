@@ -37,7 +37,7 @@ pub fn streamed_amount(env: &Env, info: &StreamInfo) -> Result<i128, Error> {
 /// exceed `streamed` (e.g. if ledger time skews or a top-up changes
 /// effective balance) by clamping to zero rather than returning an error.
 pub fn withdrawable(env: &Env, info: &StreamInfo) -> Result<i128, Error> {
-    let streamed  = streamed_amount(env, info)?;
+    let streamed = streamed_amount(env, info)?;
     let available = streamed.saturating_sub(info.withdrawn);
     Ok(available.max(0))
 }

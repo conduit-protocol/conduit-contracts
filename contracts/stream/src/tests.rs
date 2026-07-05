@@ -1,19 +1,24 @@
 #![cfg(test)]
 
+// The crate is `#![no_std]`, but this module only compiles under `cargo test`,
+// where `std` is available as a linked dependency of the test harness anyway.
+extern crate std;
+use std::boxed::Box;
+
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token, Address, Env,
 };
 
-use crate::{DripStream, DripStreamClient};
+use crate::{DripStream, DripStreamClient, Error};
 
 /// Deploy a mock token and a DripStream, returning both clients and
 /// the sender/recipient addresses.
 struct Setup {
-    env:       Env,
-    client:    DripStreamClient<'static>,
-    token:     token::Client<'static>,
-    sender:    Address,
+    env: Env,
+    client: DripStreamClient<'static>,
+    token: token::Client<'static>,
+    sender: Address,
     recipient: Address,
 }
 
@@ -22,14 +27,16 @@ impl Setup {
         let env = Env::default();
         env.mock_all_auths();
 
-        let sender    = Address::generate(&env);
+        let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
 
         // Deploy a mock Stellar asset contract
         let token_admin = Address::generate(&env);
-        let token_addr  = env.register_stellar_asset_contract(token_admin.clone());
-        let tok         = token::Client::new(&env, &token_addr);
-        let tok_admin   = token::StellarAssetClient::new(&env, &token_addr);
+        let token_addr = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let tok = token::Client::new(&env, &token_addr);
+        let tok_admin = token::StellarAssetClient::new(&env, &token_addr);
 
         let deposit = rate_per_second * duration_secs as i128;
 
@@ -39,19 +46,19 @@ impl Setup {
         // Set ledger timestamp to a baseline
         let now: u64 = 1_000_000;
         env.ledger().set(LedgerInfo {
-            timestamp:          now,
-            protocol_version:   21,
-            sequence_number:    1,
-            network_id:         Default::default(),
-            base_reserve:       10,
+            timestamp: now,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
             min_temp_entry_ttl: 16,
             min_persistent_entry_ttl: 4096,
-            max_entry_ttl:      6_312_000,
+            max_entry_ttl: 6_312_000,
         });
 
         // Deploy stream
         let stream_id = env.register_contract(None, DripStream);
-        let client    = DripStreamClient::new(&env, &stream_id);
+        let client = DripStreamClient::new(&env, &stream_id);
 
         // Transfer deposit into stream
         tok.transfer(&sender, &stream_id, &deposit);
@@ -61,23 +68,29 @@ impl Setup {
             &recipient,
             &token_addr,
             &rate_per_second,
-            &now,               // start_time = now
+            &now,                   // start_time = now
             &(now + duration_secs), // end_time
             &clawback,
         );
 
         // Leak the env so we can return 'static references — acceptable in tests.
         let env: &'static Env = Box::leak(Box::new(env));
-        let client            = DripStreamClient::new(env, &stream_id);
-        let token             = token::Client::new(env, &token_addr);
+        let client = DripStreamClient::new(env, &stream_id);
+        let token = token::Client::new(env, &token_addr);
 
-        Self { env: unsafe { std::ptr::read(env) }, client, token, sender, recipient }
+        Self {
+            env: unsafe { std::ptr::read(env) },
+            client,
+            token,
+            sender,
+            recipient,
+        }
     }
 
     fn advance_secs(&self, secs: u64) {
         let ts = self.env.ledger().timestamp() + secs;
         self.env.ledger().set(LedgerInfo {
-            timestamp:          ts,
+            timestamp: ts,
             ..self.env.ledger().get()
         });
     }
@@ -113,17 +126,17 @@ fn withdraw_capped_at_available() {
 }
 
 #[test]
-#[should_panic(expected = "NothingToWithdraw")]
 fn withdraw_before_any_elapsed_panics() {
     let s = Setup::new(100, 3600, false);
-    s.client.withdraw(&1);
+    let result = s.client.try_withdraw(&1);
+    assert_eq!(result, Err(Ok(Error::NothingToWithdraw)));
 }
 
 #[test]
 fn withdrawable_stops_at_end_time() {
     let s = Setup::new(100, 100, false); // 100s stream
     s.advance_secs(200); // advance past end_time
-    // Should be capped at 100s worth = 10_000
+                         // Should be capped at 100s worth = 10_000
     assert_eq!(s.client.withdrawable(), 10_000);
 }
 
@@ -146,24 +159,24 @@ fn resume_continues_streaming() {
     s.client.pause();
     s.advance_secs(200); // 200s paused (should not count)
     s.client.resume();
-    s.advance_secs(50);  // 50s more elapsed → +5_000
-    // Total should be 150s of streaming = 15_000
+    s.advance_secs(50); // 50s more elapsed → +5_000
+                        // Total should be 150s of streaming = 15_000
     assert_eq!(s.client.withdrawable(), 15_000);
 }
 
 #[test]
-#[should_panic(expected = "AlreadyPaused")]
 fn double_pause_panics() {
     let s = Setup::new(100, 3600, false);
     s.client.pause();
-    s.client.pause(); // should panic
+    let result = s.client.try_pause();
+    assert_eq!(result, Err(Ok(Error::AlreadyPaused)));
 }
 
 #[test]
-#[should_panic(expected = "NotPaused")]
 fn resume_unpaused_panics() {
     let s = Setup::new(100, 3600, false);
-    s.client.resume(); // not paused
+    let result = s.client.try_resume(); // not paused
+    assert_eq!(result, Err(Ok(Error::NotPaused)));
 }
 
 // ── Cancel ────────────────────────────────────────────────────────────────────
@@ -183,30 +196,31 @@ fn cancel_before_start_refunds_full_deposit() {
 fn cancel_halfway_splits_correctly() {
     let s = Setup::new(100, 3600, false);
     s.advance_secs(1800); // halfway
-    let sender_before    = s.token.balance(&s.sender);
+    let sender_before = s.token.balance(&s.sender);
     let recipient_before = s.token.balance(&s.recipient);
     s.client.cancel();
     // Recipient gets 1800 × 100 = 180_000 (earned but not withdrawn)
     // Sender gets 180_000 refund
     assert_eq!(s.token.balance(&s.recipient) - recipient_before, 180_000);
-    assert_eq!(s.token.balance(&s.sender)    - sender_before,    180_000);
+    assert_eq!(s.token.balance(&s.sender) - sender_before, 180_000);
 }
 
 #[test]
-#[should_panic(expected = "StreamCancelled")]
 fn cancel_then_cancel_panics() {
     let s = Setup::new(100, 3600, false);
     s.client.cancel();
-    s.client.cancel();
+    let result = s.client.try_cancel();
+    assert_eq!(result, Err(Ok(Error::StreamCancelled)));
 }
 
 #[test]
-#[should_panic(expected = "StreamCancelled")]
 fn withdraw_after_cancel_panics() {
     let s = Setup::new(100, 3600, false);
     s.advance_secs(100);
     s.client.cancel();
-    s.client.withdraw(&1); // stream is fully settled; withdraw blocked
+    // stream is fully settled; withdraw blocked
+    let result = s.client.try_withdraw(&1);
+    assert_eq!(result, Err(Ok(Error::StreamCancelled)));
 }
 
 // ── Clawback ─────────────────────────────────────────────────────────────────
@@ -223,10 +237,10 @@ fn clawback_reclaims_unstreamed() {
 }
 
 #[test]
-#[should_panic(expected = "ClawbackDisabled")]
 fn clawback_disabled_panics() {
     let s = Setup::new(100, 3600, false);
-    s.client.clawback();
+    let result = s.client.try_clawback();
+    assert_eq!(result, Err(Ok(Error::ClawbackDisabled)));
 }
 
 // ── Top-up ────────────────────────────────────────────────────────────────────
@@ -268,21 +282,21 @@ fn withdrawable_returns_zero_after_cancel() {
 
 #[test]
 fn pause_then_cancel_refunds_correctly() {
-    let s          = Setup::new(100, 3600, false);
-    let deposit    = 100 * 3600; // 360_000
+    let s = Setup::new(100, 3600, false);
+    let deposit = 100 * 3600; // 360_000
 
     s.advance_secs(600); // 60_000 streamed
     s.client.pause();
     s.advance_secs(1_000); // time passes; not counted
 
-    let sender_before    = s.token.balance(&s.sender);
+    let sender_before = s.token.balance(&s.sender);
     let recipient_before = s.token.balance(&s.recipient);
     s.client.cancel();
 
     // Recipient should get 60_000 (earned before pause)
     // Sender should get 360_000 − 60_000 = 300_000
     assert_eq!(s.token.balance(&s.recipient) - recipient_before, 60_000);
-    assert_eq!(s.token.balance(&s.sender)    - sender_before,    300_000);
+    assert_eq!(s.token.balance(&s.sender) - sender_before, 300_000);
     let _ = deposit; // suppress unused warning
 }
 
@@ -290,10 +304,10 @@ fn pause_then_cancel_refunds_correctly() {
 
 #[test]
 fn info_returns_correct_initial_state() {
-    let s   = Setup::new(250, 7_200, true);
+    let s = Setup::new(250, 7_200, true);
     let inf = s.client.info();
 
-    assert_eq!(inf.rate_per_second,  250);
+    assert_eq!(inf.rate_per_second, 250);
     assert!(!inf.paused);
     assert!(!inf.cancelled);
     assert!(inf.clawback_enabled);

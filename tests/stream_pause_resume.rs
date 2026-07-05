@@ -1,47 +1,57 @@
 //! Integration tests: pause / resume behaviour.
 
+use drip_stream::{DripStream, DripStreamClient, Error};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token, Address, Env,
 };
-use drip_stream::{DripStream, DripStreamClient};
 
 fn base_env() -> Env {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set(LedgerInfo {
-        timestamp:                1_000_000,
-        protocol_version:         21,
-        sequence_number:          1,
-        network_id:               Default::default(),
-        base_reserve:             10,
-        min_temp_entry_ttl:       16,
+        timestamp: 1_000_000,
+        protocol_version: 21,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
         min_persistent_entry_ttl: 4096,
-        max_entry_ttl:            6_312_000,
+        max_entry_ttl: 6_312_000,
     });
     env
 }
 
-fn deploy_stream(
-    env:       &Env,
-    sender:    &Address,
+fn deploy_stream<'a>(
+    env: &'a Env,
+    sender: &Address,
     recipient: &Address,
-    rate:      i128,
-    duration:  u64,
-) -> (DripStreamClient<'_>, Address) {
+    rate: i128,
+    duration: u64,
+) -> (DripStreamClient<'a>, Address) {
     let token_admin = Address::generate(env);
-    let token_addr  = env.register_stellar_asset_contract(token_admin.clone());
-    let deposit     = rate * duration as i128;
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let deposit = rate * duration as i128;
 
     token::StellarAssetClient::new(env, &token_addr).mint(sender, &deposit);
 
     let stream_id = env.register_contract(None, DripStream);
-    let client    = DripStreamClient::new(env, &stream_id);
+    let client = DripStreamClient::new(env, &stream_id);
 
     token::Client::new(env, &token_addr).transfer(sender, &stream_id, &deposit);
 
     let now = env.ledger().timestamp();
-    client.initialize(sender, recipient, &token_addr, &rate, &now, &(now + duration), &false);
+    client.initialize(
+        sender,
+        recipient,
+        &token_addr,
+        &rate,
+        &now,
+        &(now + duration),
+        &false,
+    );
 
     (client, token_addr)
 }
@@ -57,8 +67,8 @@ fn advance(env: &Env, secs: u64) {
 
 #[test]
 fn pause_freezes_withdrawable_amount() {
-    let env       = base_env();
-    let sender    = Address::generate(&env);
+    let env = base_env();
+    let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     let (client, _) = deploy_stream(&env, &sender, &recipient, 1_000, 3_600);
 
@@ -74,8 +84,8 @@ fn pause_freezes_withdrawable_amount() {
 
 #[test]
 fn paused_time_excluded_from_streamed_total() {
-    let env       = base_env();
-    let sender    = Address::generate(&env);
+    let env = base_env();
+    let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     let (client, _) = deploy_stream(&env, &sender, &recipient, 1_000, 7_200);
 
@@ -91,17 +101,17 @@ fn paused_time_excluded_from_streamed_total() {
 
 #[test]
 fn resume_after_pause_continues_stream_correctly() {
-    let env       = base_env();
-    let sender    = Address::generate(&env);
+    let env = base_env();
+    let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     let (client, token_addr) = deploy_stream(&env, &sender, &recipient, 500, 7_200);
     let tok = token::Client::new(&env, &token_addr);
 
-    advance(&env, 400);   // 400 × 500 = 200_000 streamed
+    advance(&env, 400); // 400 × 500 = 200_000 streamed
     client.pause();
     advance(&env, 2_000); // 2000s paused
     client.resume();
-    advance(&env, 200);   // 200 × 500 = 100_000 more streamed
+    advance(&env, 200); // 200 × 500 = 100_000 more streamed
 
     assert_eq!(client.withdrawable(), 300_000);
 
@@ -112,32 +122,32 @@ fn resume_after_pause_continues_stream_correctly() {
 // ── Error cases ──────────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "AlreadyPaused")]
 fn double_pause_is_rejected() {
-    let env    = base_env();
+    let env = base_env();
     let sender = Address::generate(&env);
-    let recip  = Address::generate(&env);
+    let recip = Address::generate(&env);
     let (client, _) = deploy_stream(&env, &sender, &recip, 100, 3_600);
     client.pause();
-    client.pause(); // second pause should error
+    let result = client.try_pause(); // second pause should error
+    assert_eq!(result, Err(Ok(Error::AlreadyPaused)));
 }
 
 #[test]
-#[should_panic(expected = "NotPaused")]
 fn resume_on_running_stream_is_rejected() {
-    let env    = base_env();
+    let env = base_env();
     let sender = Address::generate(&env);
-    let recip  = Address::generate(&env);
+    let recip = Address::generate(&env);
     let (client, _) = deploy_stream(&env, &sender, &recip, 100, 3_600);
-    client.resume(); // stream is not paused
+    let result = client.try_resume(); // stream is not paused
+    assert_eq!(result, Err(Ok(Error::NotPaused)));
 }
 
 // ── Recipient can withdraw while paused ──────────────────────────────────────
 
 #[test]
 fn recipient_can_withdraw_accumulated_balance_while_paused() {
-    let env       = base_env();
-    let sender    = Address::generate(&env);
+    let env = base_env();
+    let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     let (client, token_addr) = deploy_stream(&env, &sender, &recipient, 1_000, 3_600);
     let tok = token::Client::new(&env, &token_addr);
@@ -159,8 +169,8 @@ fn recipient_can_withdraw_accumulated_balance_while_paused() {
 
 #[test]
 fn multiple_pause_resume_cycles_accumulate_correctly() {
-    let env       = base_env();
-    let sender    = Address::generate(&env);
+    let env = base_env();
+    let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     let (client, _) = deploy_stream(&env, &sender, &recipient, 1_000, 36_000);
 
