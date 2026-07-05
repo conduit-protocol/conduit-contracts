@@ -39,7 +39,20 @@ fn top_up(env: Env, amount: i128) -> Result<(), Error>
 fn clawback(env: Env) -> Result<i128, Error>
 fn withdrawable(env: Env) -> i128
 fn info(env: Env) -> StreamInfo
+
+// Recipient-initiated escape hatch — see docs/architecture.md
+fn force_cancel(env: Env) -> Result<(), Error>
+
+// Recipient reassigns their claim to a new address; withdrawable balance carries over
+fn transfer_recipient(env: Env, new_recipient: Address) -> Result<(), Error>
+
+// Read-only: total streamed so far, regardless of what's been withdrawn
+fn streamed_total(env: Env) -> i128
 ```
+
+> **Not yet in the SDK.** `force_cancel`, `transfer_recipient`, and `streamed_total` exist in the
+> contract but aren't wrapped by `conduit-sdk` yet — callers need to invoke them directly until
+> the SDK catches up.
 
 **Events emitted:**
 
@@ -51,6 +64,9 @@ fn info(env: Env) -> StreamInfo
 | `stream_resumed` | `[sender]` | `{ resumed_at }` |
 | `stream_topped_up` | `[sender]` | `{ amount, new_balance }` |
 | `stream_clawback` | `[sender]` | `{ amount }` |
+| `xfer_rec` | `[old_recipient]` | `new_recipient` |
+
+`force_cancel` reuses the `stream_cancelled` event — from the chain's perspective it settles the same way `cancel()` does.
 
 ---
 
@@ -63,6 +79,7 @@ The singleton protocol entry point. Deploys new `DripStream` contracts, assigns 
 ```rust
 fn create_stream(
     env:           Env,
+    sender:        Address,   // creator / funder — must require_auth
     recipient:     Address,
     token:         Address,
     deposit:       i128,
@@ -76,7 +93,11 @@ fn stream_address(env: Env, stream_id: u64) -> Option<Address>
 fn streams_by_sender(env: Env, sender: Address, offset: u32, limit: u32) -> Vec<u64>
 fn streams_by_recipient(env: Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64>
 fn stream_count(env: Env) -> u64
-fn protocol_fee_bps(env: Env) -> u32   // basis points, e.g. 30 = 0.3%
+fn protocol_fee_bps(env: Env) -> u32   // basis points, e.g. 30 = 0.3%; stub — not yet read from DripGovernor
+
+// Governor-only: point future create_stream calls at a new DripStream WASM version.
+// Existing streams are unaffected — each is an independently deployed contract.
+fn upgrade_stream_wasm(env: Env, new_wasm_hash: BytesN<32>)
 ```
 
 **Validation on `create_stream`:**
@@ -104,11 +125,33 @@ Protocol configuration and upgrade authority. Holds mutable parameters that Drip
 | `max_rate_per_second` | `10^15` | Maximum rate cap |
 | `factory_address` | set at init | The DripFactory this governor controls |
 
+**Public functions:**
+
+```rust
+fn config(env: Env) -> GovernorConfig   // read-only: full config struct
+
+// All setters below require authority.require_auth() and return InvalidParam on bad input
+fn set_fee_bps(env: Env, fee_bps: u32) -> Result<(), Error>              // 0..=10_000
+fn set_fee_recipient(env: Env, recipient: Address) -> Result<(), Error>
+fn set_min_duration(env: Env, seconds: u64) -> Result<(), Error>         // > 0
+fn set_max_rate(env: Env, max_rate: i128) -> Result<(), Error>           // > 0
+fn transfer_authority(env: Env, new_authority: Address) -> Result<(), Error>
+```
+
+> **Note:** `DripFactory::protocol_fee_bps()` is currently a hardcoded stub (always returns
+> `30`) — it does not actually read `fee_bps` from `DripGovernor` yet, despite the factory
+> storing a governor address. Wiring that read through is on the roadmap.
+
 ---
 
 ## Error Codes
 
-All contracts share a common `Error` enum:
+Each contract defines its **own** `Error` enum — the same numeric code means something different
+in each one (e.g. code `1` is `NotAuthorized` in `DripStream` and `DripGovernor`, but
+`NotInitialized` in `DripFactory`). Match errors against the enum for the contract you called,
+not by number alone.
+
+**`DripStream::Error`**
 
 | Code | Name | Description |
 |------|------|-------------|
@@ -124,6 +167,25 @@ All contracts share a common `Error` enum:
 | `10` | `NotPaused` | Cannot resume a stream that isn't paused |
 | `11` | `ClawbackDisabled` | Clawback not enabled on this stream |
 | `12` | `ArithmeticOverflow` | Integer overflow in calculation |
+| `13` | `PauseThresholdNotMet` | `force_cancel` called before the pause threshold (30 days) elapsed |
+
+**`DripFactory::Error`**
+
+| Code | Name | Description |
+|------|------|-------------|
+| `1` | `NotInitialized` | Factory hasn't been `initialize()`d |
+| `2` | `InvalidDeposit` | `deposit <= 0` |
+| `3` | `InvalidRate` | `rate_per_sec <= 0` |
+| `4` | `InvalidTimeRange` | `end_time != 0 && end_time <= start_time` |
+| `5` | `InsufficientDeposit` | `deposit < rate_per_sec` (can't fund even 1 second) |
+| `6` | `BackdatedStream` | `start_time < env.ledger().timestamp()` |
+
+**`DripGovernor::Error`**
+
+| Code | Name | Description |
+|------|------|-------------|
+| `1` | `NotAuthorized` | Caller is not the current authority |
+| `2` | `InvalidParam` | Setter argument failed validation (e.g. `fee_bps > 10_000`, `0` duration/rate) |
 
 ---
 
@@ -239,7 +301,7 @@ conduit-contracts/
 
 ## Contributing
 
-See the root [`CONTRIBUTING.md`](../CONTRIBUTING.md). For contract-specific guidance, see [`docs/architecture.md`](./docs/architecture.md).
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). For contract-specific guidance, see [`docs/architecture.md`](./docs/architecture.md).
 
 ---
 

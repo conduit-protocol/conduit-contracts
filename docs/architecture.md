@@ -37,8 +37,8 @@ A technical walkthrough of how the three Conduit contracts fit together.
   │  State machine:                                                      │
   │                                                                      │
   │    ACTIVE ──pause()──► PAUSED                                        │
-  │      │  ◄──resume()──    │                                           │
-  │      │                   │                                           │
+  │      │  ◄──resume()──    │  ──force_cancel()──►  CANCELLED           │
+  │      │                   │   (recipient-only, 30d after pause)       │
   │    cancel()           cancel()                                       │
   │      │                   │                                           │
   │      ▼                   ▼                                           │
@@ -91,11 +91,18 @@ When `cancel()` is called, both parties are settled in the same transaction:
 
 After `Cancelled = true`, `withdraw()` is blocked. The atomic settlement in `cancel()` is therefore mandatory — the recipient cannot retrieve tokens any other way.
 
+**Recipient-only escape hatches:**
+
+- `force_cancel()` lets the recipient settle unilaterally if the sender pauses the stream and never resumes it — without this, a malicious or abandoned sender could freeze a paused stream indefinitely and hold the recipient's earned-but-unwithdrawn balance hostage. Guarded by a hardcoded 30-day threshold (`PAUSE_THRESHOLD_SECS`) measured from `paused_at`; settles identically to `cancel()`.
+- `transfer_recipient(new_recipient)` reassigns the recipient address. Any balance already earned stays claimable by whoever holds the role — it isn't tied to the original recipient's identity. The sender is not notified on-chain (an indexer watching the `xfer_rec` event is the intended integration point).
+
 ### DripGovernor
 
 The governor holds mutable protocol parameters. In the current version it is controlled by a single `authority` address (intended to be a multisig). In a future release, governance will transition to on-chain token voting.
 
-The factory reads governor parameters at stream creation time. The governor does not hold any token balance.
+The governor does not hold any token balance.
+
+**Not yet wired up:** the factory stores a `GovernorAddress` at init and `DripFactory::protocol_fee_bps()` exists as a public read, but it's currently a hardcoded stub that always returns `30` — it does not call into `DripGovernor::config()` yet. Until that's wired up, changing `fee_bps` via the governor has no effect on what the factory reports.
 
 ---
 
