@@ -5,7 +5,8 @@ mod storage;
 
 // Import `token` as `tok` to avoid shadowing by any `token: Address` parameter.
 use soroban_sdk::{
-    contract, contracterror, contractimpl, token as tok, Address, BytesN, Env, IntoVal, Vec,
+    contract, contracterror, contractimpl, panic_with_error, token as tok, Address, BytesN, Env,
+    IntoVal, Vec,
 };
 
 use storage::DataKey;
@@ -20,6 +21,9 @@ pub enum Error {
     InvalidTimeRange = 4,
     InsufficientDeposit = 5,
     BackdatedStream = 6,
+    AlreadyInitialized = 7,
+    RateExceedsMax = 8,
+    DurationTooShort = 9,
 }
 
 #[contract]
@@ -28,7 +32,16 @@ pub struct DripFactory;
 #[contractimpl]
 impl DripFactory {
     /// One-time setup — called by the deploy script.
+    ///
+    /// Guards against re-initialization: without this check, anyone could
+    /// call `initialize` again to point the factory at an attacker-controlled
+    /// `stream_wasm_hash` or `governor`, hijacking every subsequent
+    /// `create_stream` call.
     pub fn initialize(env: Env, stream_wasm_hash: BytesN<32>, governor: Address) {
+        if env.storage().instance().has(&DataKey::StreamCount) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::StreamWasmHash, &stream_wasm_hash);

@@ -32,6 +32,20 @@ fn initialize_sets_correct_defaults() {
     assert_eq!(config.fee_recipient, fee_recipient);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn re_initializing_governor_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _authority, _fee_recipient) = deploy_governor(&env);
+    // An attacker calling initialize() again to install themselves as
+    // Authority must be rejected — otherwise they could set fee_bps to the
+    // maximum or redirect fee_recipient.
+    let attacker = Address::generate(&env);
+    client.initialize(&attacker, &attacker, &attacker);
+}
+
 // ── Fee BPS ──────────────────────────────────────────────────────────────────
 
 #[test]

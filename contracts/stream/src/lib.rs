@@ -7,7 +7,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env};
 
 pub use errors::Error;
 use storage::{DataKey, StreamInfo};
@@ -70,6 +70,11 @@ pub struct DripStream;
 #[contractimpl]
 impl DripStream {
     /// Called once by the factory after deployment.
+    ///
+    /// Guards against re-initialization: without this check, anyone could
+    /// call `initialize` again on an already-funded stream to overwrite
+    /// `Sender`/`Recipient` and then drain the escrowed balance via
+    /// `cancel()`/`clawback()`.
     #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
@@ -81,6 +86,10 @@ impl DripStream {
         end_time: u64,
         clawback_enabled: bool,
     ) {
+        if env.storage().instance().has(&DataKey::Sender) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+
         let s = env.storage().instance();
         s.set(&DataKey::Sender, &sender);
         s.set(&DataKey::Recipient, &recipient);
@@ -97,6 +106,10 @@ impl DripStream {
 
     /// Recipient withdraws `amount` tokens.
     pub fn withdraw(env: Env, amount: i128) -> Result<i128, Error> {
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
         let info = load(&env);
         assert_not_cancelled(&info)?;
         info.recipient.require_auth();
@@ -216,6 +229,10 @@ impl DripStream {
 
     /// Sender deposits additional tokens into the stream.
     pub fn top_up(env: Env, amount: i128) -> Result<(), Error> {
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
         let info = load(&env);
         assert_not_cancelled(&info)?;
         info.sender.require_auth();

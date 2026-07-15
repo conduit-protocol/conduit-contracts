@@ -78,6 +78,18 @@ fn protocol_fee_bps_returns_default_30() {
     assert_eq!(client.protocol_fee_bps(), 30);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn re_initializing_factory_panics() {
+    let env = base_env();
+    let client = deploy_factory(&env);
+    // An attacker calling initialize() again to swap in their own
+    // stream_wasm_hash/governor must be rejected.
+    let attacker_governor = Address::generate(&env);
+    let attacker_hash = BytesN::from_array(&env, &[1u8; 32]);
+    client.initialize(&attacker_hash, &attacker_governor);
+}
+
 // ── Validation errors (all fail before deployment) ────────────────────────────
 
 fn make_token(env: &Env, sender: &Address, amount: i128) -> Address {

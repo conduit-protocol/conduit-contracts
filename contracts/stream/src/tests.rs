@@ -268,6 +268,35 @@ fn top_up_on_cancelled_stream_is_rejected() {
     assert!(result.is_err());
 }
 
+#[test]
+fn top_up_rejects_zero_and_negative_amount() {
+    let s = Setup::new(100, 3600, false);
+    assert_eq!(s.client.try_top_up(&0), Err(Ok(Error::InvalidAmount)));
+    assert_eq!(s.client.try_top_up(&-1), Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn withdraw_rejects_zero_and_negative_amount() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(100);
+    assert_eq!(s.client.try_withdraw(&0), Err(Ok(Error::InvalidAmount)));
+    assert_eq!(s.client.try_withdraw(&-1), Err(Ok(Error::InvalidAmount)));
+}
+
+// ── Initialization guard ──────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn re_initializing_an_active_stream_panics() {
+    let s = Setup::new(100, 3600, false);
+    // An attacker calling initialize() again to hijack sender/recipient
+    // must be rejected — otherwise they could redirect the escrowed balance
+    // to themselves via cancel()/clawback().
+    let attacker = Address::generate(&s.env);
+    s.client
+        .initialize(&attacker, &attacker, &s.token.address, &1, &0, &0, &false);
+}
+
 // ── Cancelled stream state ────────────────────────────────────────────────────
 
 #[test]
