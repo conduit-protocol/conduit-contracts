@@ -10,6 +10,8 @@ pub enum DataKey {
     MinDurationSeconds,
     /// Maximum rate per second in stroops
     MaxRatePerSecond,
+    /// Maximum allowed stream duration in seconds
+    MaxDurationSeconds,
     /// The DripFactory contract this governor controls
     FactoryAddress,
     /// Multisig / authority address allowed to change parameters

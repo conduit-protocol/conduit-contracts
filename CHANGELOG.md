@@ -7,6 +7,9 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ### Added
 - `force_cancel()` on `DripStream` — recipient can settle atomically after sender leaves stream paused for more than 30 days (`PauseThresholdNotMet` error returned if threshold not met)
 - `PauseThresholdNotMet` error code (13) added to `Error` enum
+- `max_duration_seconds` governor parameter with default of 10 years (315,360,000 s) to prevent integer overflow in `rate_per_sec × duration` calculations
+- `DripGovernor::set_max_duration` authority-gated setter for updating the maximum stream duration
+- `DurationExceedsMax` error code (11) on `DripFactory` returned when a fixed-duration stream exceeds `max_duration_seconds`
 
 ### Changed
 - `get_escrow_for_user` visibility scoped; bare `get_escrow` now `pub(crate)` only

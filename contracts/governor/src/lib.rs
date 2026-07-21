@@ -38,6 +38,7 @@ impl DripGovernor {
         s.set(&DataKey::FeeBps, &30_u32);
         s.set(&DataKey::FeeRecipient, &fee_recipient);
         s.set(&DataKey::MinDurationSeconds, &3600_u64);
+        s.set(&DataKey::MaxDurationSeconds, &315_360_000_u64); // 10 years
         s.set(&DataKey::MaxRatePerSecond, &1_000_000_000_000_000_i128);
         s.set(&DataKey::FactoryAddress, &factory_address);
     }
@@ -86,6 +87,17 @@ impl DripGovernor {
         env.storage()
             .instance()
             .set(&DataKey::MaxRatePerSecond, &max_rate);
+        Ok(())
+    }
+
+    pub fn set_max_duration(env: Env, seconds: u64) -> Result<(), Error> {
+        auth::require_authority(&env)?;
+        if seconds == 0 {
+            return Err(Error::InvalidParam);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxDurationSeconds, &seconds);
         Ok(())
     }
 

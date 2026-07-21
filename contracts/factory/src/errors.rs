@@ -14,4 +14,5 @@ pub enum Error {
     RateExceedsMax = 8,
     DurationTooShort = 9,
     ArithmeticOverflow = 10,
+    DurationExceedsMax = 11,
 }
