@@ -6,7 +6,7 @@ mod errors;
 mod storage;
 mod ttl;
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, Env, Address};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env};
 
 pub use config::GovernorConfig;
 pub use errors::Error;
