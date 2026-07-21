@@ -103,12 +103,20 @@ fn protocol_fee_bps(env: Env) -> u32   // basis points, e.g. 30 = 0.3%; reads li
 // Governor-only: point future create_stream calls at a new DripStream WASM version.
 // Existing streams are unaffected — each is an independently deployed contract.
 fn upgrade_stream_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error>
+
+// Governor-only: emergency halt. While paused, create_stream reverts with
+// ContractPaused before pulling any deposit. Already-deployed streams keep
+// running — front-ends and the stream contract can gate withdrawals on is_paused.
+fn pause(env: Env) -> Result<(), Error>
+fn unpause(env: Env) -> Result<(), Error>
+fn is_paused(env: Env) -> bool
 ```
 
 **Validation on `create_stream`:**
 
 All checks run before any state mutation (fail early — invalid calls neither touch storage nor extend TTL):
 
+- Factory not under emergency pause (`is_paused() == false`, else `ContractPaused`)
 - `deposit > 0`
 - `rate_per_sec > 0`
 - `deposit >= rate_per_sec` (must fund at least 1 second)
