@@ -10,7 +10,7 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 - `PauseThresholdNotMet` error code (13) added to `Error` enum
 - `max_duration_seconds` governor parameter with default of 10 years (315,360,000 s) to prevent integer overflow in `rate_per_sec × duration` calculations
 - `DripGovernor::set_max_duration` authority-gated setter for updating the maximum stream duration
-- `DurationExceedsMax` error code (11) on `DripFactory` returned when a fixed-duration stream exceeds `max_duration_seconds`
+- `DurationExceedsMax` error code (14) on `DripFactory` returned when a fixed-duration stream exceeds `max_duration_seconds`
 
 ### Added
 - Role-based access control (RBAC) on `DripGovernor` — replaces the single `Authority` with `Admin`, `FeeManager`, and `RateManager` roles so independent wallets can own fee policy and rate/duration bounds. Adds `grant_role`, `revoke_role`, and `has_role`; `Admin` gates role administration, `FeeManager` gates `set_fee_bps`/`set_fee_recipient`, and `RateManager` gates `set_max_rate`/`set_min_duration`. A role may be held by multiple accounts, and the last `Admin` cannot be revoked (`LastAdmin`, code 4)
