@@ -60,9 +60,11 @@ impl DripFactory {
     ) -> Result<u64, Error> {
         // ── Auth ─────────────────────────────────────────────────────────
         sender.require_auth();
-        ttl::bump_instance(&env);
 
         // ── Validation ───────────────────────────────────────────────────
+        // Fail early: all input checks run before any state is touched, so
+        // invalid calls (e.g. an empty stream with a non-positive amount)
+        // neither mutate storage nor pay a TTL extension.
         if deposit <= 0 {
             return Err(Error::InvalidDeposit);
         }
@@ -99,6 +101,9 @@ impl DripFactory {
             .ok_or(Error::NotInitialized)?;
         let config = governance::config(&env, &governor);
         governance::enforce_bounds(&config, rate_per_sec, start_time, end_time)?;
+
+        // ── All validation passed — safe to touch state now ──────────────
+        ttl::bump_instance(&env);
 
         // ── Pull deposit from sender ──────────────────────────────────────
         // Using the aliased `tok` to avoid any future shadowing issues.
@@ -140,12 +145,6 @@ impl DripFactory {
         // StreamAddr and the sender/recipient indices grow without bound, so
         // they use persistent storage (not instance storage) to avoid hitting
         // instance storage size limits as the protocol scales.
-        //
-        // Persistent storage entry 1 — StreamAddr:
-        //   Key:   DataKey::StreamAddr(stream_id)
-        //          XDR serialization: [discriminant: u32][stream_id: u64]
-        //   Value: Address (the deployed DripStream contract address)
-        //          XDR serialization: XDR-encoded contract Address
         env.storage()
             .persistent()
             .set(&DataKey::StreamAddr(stream_id), &stream_addr);
@@ -159,11 +158,6 @@ impl DripFactory {
             .instance()
             .set(&DataKey::StreamCount, &(stream_count + 1));
 
-        // Persistent storage entry 2 — BySender:
-        //   Key:   DataKey::BySender(sender)
-        //          XDR serialization: [discriminant: u32][sender: XDR Address]
-        //   Value: Vec<u64> (ordered list of stream IDs this sender has created)
-        //          XDR serialization: XDR-encoded Vec of u64 elements
         let mut by_sender: Vec<u64> = env
             .storage()
             .persistent()
@@ -179,11 +173,6 @@ impl DripFactory {
             ttl::EXTEND_TO,
         );
 
-        // Persistent storage entry 3 — ByRecipient:
-        //   Key:   DataKey::ByRecipient(recipient)
-        //          XDR serialization: [discriminant: u32][recipient: XDR Address]
-        //   Value: Vec<u64> (ordered list of stream IDs where this address is recipient)
-        //          XDR serialization: XDR-encoded Vec of u64 elements
         let mut by_recipient: Vec<u64> = env
             .storage()
             .persistent()
