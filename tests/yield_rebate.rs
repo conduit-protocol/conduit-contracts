@@ -38,7 +38,7 @@ fn calculate_rebate_with_params(
     time_elapsed_seconds: u64,
 ) -> Result<i128, RebateError> {
     // Validate parameters
-    if apy_bps > MAX_REBATE_RATE_BPS || apy_bps < 0 {
+    if !(0..=MAX_REBATE_RATE_BPS).contains(&apy_bps) {
         return Err(RebateError::InvalidRate);
     }
 
