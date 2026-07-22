@@ -19,34 +19,6 @@ pub fn load(env: &Env) -> StreamInfo {
 
     // Legacy path: read each field individually (pre-optimisation streams).
     StreamInfo {
-        sender: env.storage().instance().get(&DataKey::Sender).unwrap(),
-        recipient: env.storage().instance().get(&DataKey::Recipient).unwrap(),
-        token: env.storage().instance().get(&DataKey::Token).unwrap(),
-        rate_per_second: env
-            .storage()
-            .instance()
-            .get(&DataKey::RatePerSecond)
-            .unwrap(),
-        start_time: env.storage().instance().get(&DataKey::StartTime).unwrap(),
-        end_time: env.storage().instance().get(&DataKey::EndTime).unwrap(),
-        withdrawn: env
-            .storage()
-            .instance()
-            .get(&DataKey::Withdrawn)
-            .unwrap_or(0),
-        paused_at: env
-            .storage()
-            .instance()
-            .get(&DataKey::PausedAt)
-            .unwrap_or(0),
-<<<<<<< HEAD
-        flags: env.storage().instance().get(&DataKey::Flags).unwrap_or(0),
-=======
-        flags: env
-            .storage()
-            .instance()
-            .get(&DataKey::Flags)
-            .unwrap_or(0),
         sender: s.get(&DataKey::Sender).unwrap(),
         recipient: s.get(&DataKey::Recipient).unwrap(),
         token: s.get(&DataKey::Token).unwrap(),
@@ -54,11 +26,8 @@ pub fn load(env: &Env) -> StreamInfo {
         start_time: s.get(&DataKey::StartTime).unwrap(),
         end_time: s.get(&DataKey::EndTime).unwrap(),
         withdrawn: s.get(&DataKey::Withdrawn).unwrap_or(0),
-        paused: s.get(&DataKey::Paused).unwrap_or(false),
         paused_at: s.get(&DataKey::PausedAt).unwrap_or(0),
-        clawback_enabled: s.get(&DataKey::ClawbackEnabled).unwrap_or(false),
-        cancelled: s.get(&DataKey::Cancelled).unwrap_or(false),
->>>>>>> 559589375cb638f5be5ee50d454a9fd510f85e32
+        flags: s.get(&DataKey::Flags).unwrap_or(0),
     }
 }
 
@@ -77,19 +46,19 @@ pub fn save_withdrawn(env: &Env, amount: i128) {
 }
 
 pub fn set_paused(env: &Env, paused: bool) {
-    let mut flags: u32 = env.storage().instance().get(&DataKey::Flags).unwrap_or(0);
+    let mut info = load(env);
     if paused {
-        flags |= FLAG_PAUSED;
+        info.flags |= FLAG_PAUSED;
     } else {
-        flags &= !FLAG_PAUSED;
+        info.flags &= !FLAG_PAUSED;
     }
-    env.storage().instance().set(&DataKey::Flags, &flags);
+    save(env, &info);
 }
 
 pub fn set_cancelled(env: &Env) {
-    let mut flags: u32 = env.storage().instance().get(&DataKey::Flags).unwrap_or(0);
-    flags |= FLAG_CANCELLED;
-    env.storage().instance().set(&DataKey::Flags, &flags);
+    let mut info = load(env);
+    info.flags |= FLAG_CANCELLED;
+    save(env, &info);
 }
 
 pub fn assert_not_cancelled(info: &StreamInfo) -> Result<(), Error> {
