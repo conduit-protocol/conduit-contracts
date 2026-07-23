@@ -76,19 +76,3 @@ pub enum DataKey {
     /// was bumped by the walker. Missing entry is treated as `0`.
     LastBumpedId,
 }
-
-/// A single stream configuration within a `create_batch_streams` call.
-///
-/// Mirrors the per-stream parameters of `create_stream` minus `sender`
-/// (the whole batch shares one sender/authorizer) -- see
-/// `DripFactory::create_batch_streams`.
-#[contracttype]
-#[derive(Clone)]
-pub struct BatchStreamRequest {
-    pub recipient: Address,
-    pub token: Address,
-    pub deposit: i128,
-    pub rate_per_sec: i128,
-    pub start_time: u64,
-    pub end_time: u64,
-}
