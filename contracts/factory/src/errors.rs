@@ -28,4 +28,12 @@ pub enum Error {
     EmptyBatch = 16,
     /// `create_batch_streams` requests exceeded `MAX_BATCH_SIZE`.
     BatchTooLarge = 17,
+    /// Signature verification failed (invalid ed25519 signature).
+    InvalidSignature = 18,
+    /// Signature has already been used (replay attempt).
+    NonceAlreadyUsed = 19,
+    /// Signed payload's network passphrase does not match the current network.
+    NetworkMismatch = 20,
+    /// Signed payload has expired (deadline passed).
+    SignatureExpired = 21,
 }

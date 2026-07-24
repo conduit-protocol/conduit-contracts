@@ -75,6 +75,11 @@ pub enum DataKey {
     /// Value: `u64` — the last stream ID whose persistent `StreamAddr` TTL
     /// was bumped by the walker. Missing entry is treated as `0`.
     LastBumpedId,
+
+    /// **Instance storage.** Per-sender nonce for signature-based stream creation.
+    /// Key: `DataKey::SignatureNonce(Address)` — the sender's address
+    /// Value: `u64` — next valid nonce (starts at 0, incremented after each use)
+    SignatureNonce(Address),
 }
 
 /// A single stream configuration within a `create_batch_streams` call.
