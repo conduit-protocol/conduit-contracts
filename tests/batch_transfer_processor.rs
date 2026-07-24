@@ -128,7 +128,14 @@ fn process_batch_rejects_when_lock_is_held() {
         Err(Ok(Error::ProcessorLocked)),
     );
     // The ProcessorLocked path is an early return BEFORE the contract
-    // touches the lock, so the externally-imposed lock stays as-is.
+    // touches the lock. Lock in that invariant here: a future refactor
+    // that adds a stray `set(lock_key, false)` (or any storage write)
+    // adjacent to the early return would silently change a no-op-on-error
+    // contract into a state-mutating one — this assertion catches it.
+    assert!(
+        lock_state(&env, &client),
+        "ProcessorLocked must short-circuit without touching the lock",
+    );
 }
 
 #[test]
