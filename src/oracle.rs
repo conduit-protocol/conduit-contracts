@@ -128,18 +128,16 @@ impl TwapOracleIntegration {
         let lock_key = soroban_sdk::symbol_short!("O_Lock");
         let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
         if is_locked {
-            // Resolve gracefully when concurrent asynchronous hooks fire
             return Err(Error::OracleLocked);
         }
-        
+
         env.storage().instance().set(&lock_key, &true);
 
-        let config_res: Option<OracleConfig> = env
+        let config: OracleConfig = match env
             .storage()
             .instance()
-            .get(&soroban_sdk::symbol_short!("OracleCfg"));
-            
-        let config = match config_res {
+            .get(&DataKey::Config)
+        {
             Some(cfg) => cfg,
             None => {
                 env.storage().instance().set(&lock_key, &false);
@@ -147,50 +145,30 @@ impl TwapOracleIntegration {
             }
         };
 
-        // Invoke the external Oracle contract securely.
-        // Important: Ensure the oracle_address is a trusted and whitelisted contract.
-        // In a real environment, this would call `get_price` on the oracle_address
-        let current_time = env.ledger().timestamp();
-        
-        // Mock price fetch for the sake of integration testing
-        // Real implementation would be: 
-        // let price_data: (u64, u64) = env.invoke_contract(&config.oracle_address, &soroban_sdk::symbol_short!("get_twap"), ());
-        let mock_price: u64 = 50_000_000; 
-        let last_updated: u64 = current_time.saturating_sub(30); // 30 seconds ago
+        let data: PriceData = match env
+            .storage()
+            .instance()
+            .get(&DataKey::Price)
+        {
+            Some(d) => d,
+            None => {
+                env.storage().instance().set(&lock_key, &false);
+                return Err(Error::NoPriceAvailable);
+            }
+        };
 
-        if current_time.saturating_sub(last_updated) > config.max_staleness {
+        let age = env.ledger().timestamp().saturating_sub(data.updated_at);
+        if age > config.max_staleness {
             env.storage().instance().set(&lock_key, &false);
             return Err(Error::OracleStalePrice);
         }
 
-        if mock_price == 0 {
+        if data.price == 0 {
             env.storage().instance().set(&lock_key, &false);
             return Err(Error::InvalidPrice);
         }
 
         env.storage().instance().set(&lock_key, &false);
-        Ok(mock_price)
-            .get(&DataKey::Config)
-            .ok_or(Error::OracleNotConfigured)?;
-
-        let data: PriceData = env
-            .storage()
-            .instance()
-            .get(&DataKey::Price)
-            .ok_or(Error::NoPriceAvailable)?;
-
-        // `saturating_sub`, not `-`: an observation stamped ahead of the
-        // current ledger time (clock skew, or a replayed ledger) underflowed
-        // the old `current_time - last_updated` and panicked the contract.
-        let age = env.ledger().timestamp().saturating_sub(data.updated_at);
-        if age > config.max_staleness {
-            return Err(Error::OracleStalePrice);
-        }
-
-        if data.price == 0 {
-            return Err(Error::InvalidPrice);
-        }
-
         Ok(data.price)
     }
 
@@ -198,9 +176,6 @@ impl TwapOracleIntegration {
     pub fn calculate_fiat_stream_payout(env: Env, token_amount: u64) -> Result<u64, Error> {
         let current_price = Self::get_twap_price(env.clone())?;
 
-        // Was `.unwrap()`. `get_twap_price` above does check for the key, so
-        // this could not actually fire today, but the panic is one refactor
-        // away from being reachable and costs nothing to remove.
         let config: OracleConfig = env
             .storage()
             .instance()
@@ -216,17 +191,10 @@ impl TwapOracleIntegration {
             .ok_or(Error::ArithmeticOverflow)?
             / precision;
 
-        // Was a bare `value as u64`, which silently truncated any result above
-        // u64::MAX and would have under-paid a fiat-denominated stream.
         if value > u64::MAX as u128 {
             return Err(Error::ArithmeticOverflow);
         }
 
-        // Convert a nominal token amount into its fiat equivalent
-        let precision = 10u128.checked_pow(config.decimals).ok_or(Error::CalculationOverflow)?;
-        let token_val = (token_amount as u128).checked_mul(current_price as u128).ok_or(Error::CalculationOverflow)?;
-        let value = token_val.checked_div(precision).ok_or(Error::CalculationOverflow)?;
-        
         Ok(value as u64)
     }
 }

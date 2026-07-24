@@ -141,7 +141,7 @@ pub fn calculate_rebate_with_params(
 /// This function simulates a 5% APY on a principal of 1,000,000 stroops
 /// over a time period, using the fixed-point arithmetic implementation.
 #[allow(dead_code)]
-pub fn calculate_rebate(env: &Env) -> i128 {
+pub fn calculate_rebate(env: &Env) -> Result<i128, RebateError> {
     // Mock yield configuration - in production this would be read from storage
     let mock_principal = 1_000_000_i128; // 1M stroops principal
     let mock_apy_bps = 500_i128; // 5% APY in basis points
@@ -150,20 +150,12 @@ pub fn calculate_rebate(env: &Env) -> i128 {
     let mock_time_elapsed = 86_400_u64; // 1 day
 
     // Calculate rebate using fixed-point arithmetic
-    match calculate_rebate_with_params(env, mock_principal, mock_apy_bps, mock_time_elapsed) {
-        Ok(rebate) => {
-            env.events().publish(
-                ("YIELD", "CALCULATE"),
-                String::from_str(env, "Rebate processed"),
-            );
-            rebate
-        }
-        Err(_) => {
-            env.events().publish(
-                ("YIELD", "ERROR"),
-                String::from_str(env, "Rebate calculation failed"),
-            );
-            0 // Return 0 on error to maintain backwards compatibility
-        }
-    }
+    let rebate = calculate_rebate_with_params(env, mock_principal, mock_apy_bps, mock_time_elapsed)?;
+
+    env.events().publish(
+        ("YIELD", "CALCULATE"),
+        String::from_str(env, "Rebate processed"),
+    );
+
+    Ok(rebate)
 }
