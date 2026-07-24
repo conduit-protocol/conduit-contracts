@@ -51,6 +51,22 @@ impl DripStream {
             panic_with_error!(&env, Error::InvalidAmount);
         }
 
+        // Boundary check on the time range before any state is written.
+        // A bounded stream (`end_time > 0`) whose `end_time` is not strictly
+        // after `start_time` is malformed: it either streams nothing
+        // (`end_time == start_time`) or, worse, becomes permanently stuck.
+        // With `end_time < start_time`, once ledger time passes `start_time`
+        // the release math computes `end_time - start_time` on a `u64`, which
+        // underflows and surfaces as `ArithmeticOverflow`. That error then
+        // fires in `withdraw`, `cancel`, and `clawback` alike, so the escrowed
+        // balance can be neither withdrawn nor refunded — the funds are locked
+        // forever. Reject the malformed payload here, before it is persisted,
+        // rather than letting the bad state mutate storage. Open-ended streams
+        // (`end_time == 0`) are unaffected and remain valid.
+        if end_time > 0 && end_time <= start_time {
+            panic_with_error!(&env, Error::InvalidTimeRange);
+        }
+
         ttl::bump(&env);
 
         let mut flags: u32 = 0;

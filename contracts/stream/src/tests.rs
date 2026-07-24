@@ -8,7 +8,7 @@ use std::boxed::Box;
 use soroban_sdk::{
     symbol_short,
     testutils::{storage::Instance as _, Address as _, Events as _, Ledger, LedgerInfo},
-    token, Address, Env, IntoVal,
+    token, Address, Env, IntoVal, TryIntoVal,
 };
 
 use crate::{storage::DataKey, DripStream, DripStreamClient, Error};
@@ -361,6 +361,168 @@ fn re_initializing_an_active_stream_panics() {
         .initialize(&attacker, &attacker, &s.token.address, &1, &0, &0, &false);
 }
 
+// ── Time-range boundary guard (issue #81) ────────────────────────────────────
+
+/// A bounded stream whose `end_time` is *before* `start_time` is malformed.
+/// `initialize()` must reject it at the boundary with `InvalidTimeRange`
+/// (error #8) before any state is persisted — otherwise the escrowed balance
+/// gets permanently locked (see `malformed_time_range_would_lock_funds`).
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn initialize_rejects_end_time_before_start() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    let now: u64 = 1_000_000;
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &now,           // start_time
+        &(now - 3_600), // end_time BEFORE start_time → malformed
+        &false,
+    );
+}
+
+/// A zero-duration bounded stream (`end_time == start_time`) releases nothing
+/// yet still escrows tokens — the same "empty stream" class the zero-rate
+/// guard already rejects. It must fail with `InvalidTimeRange` (error #8).
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn initialize_rejects_end_time_equal_start() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    let now: u64 = 1_000_000;
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &now, // start_time
+        &now, // end_time == start_time → zero-duration, malformed
+        &false,
+    );
+}
+
+/// The guard must NOT reject legitimate open-ended streams (`end_time == 0`).
+/// This is the regression fence around the boundary check: `0` is a sentinel
+/// for "no end", not a time that precedes `start_time`.
+#[test]
+fn initialize_accepts_open_ended_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    let now: u64 = 1_000_000;
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &now,
+        &0, // open-ended → valid
+        &false,
+    );
+
+    let inf = client.info();
+    assert_eq!(inf.end_time, 0);
+    assert_eq!(inf.start_time, now);
+}
+
+/// Documents the exact failure mode the boundary check prevents.
+///
+/// We inject malformed state (`end_time < start_time`) directly through the
+/// legacy per-field storage keys, bypassing `initialize()`'s guard, then show
+/// that once ledger time passes `start_time` the release math underflows and
+/// surfaces `ArithmeticOverflow`. In a real deployment that same error fires
+/// inside `withdraw`, `cancel`, and `clawback`, so the escrow could be neither
+/// paid out nor refunded — the funds would be locked forever. The guard in
+/// `initialize()` makes this state unreachable in the first place.
+#[test]
+fn malformed_time_range_would_lock_funds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let start_time: u64 = 1_000_000;
+    let end_time: u64 = start_time - 3_600; // end BEFORE start — malformed
+
+    let stream_id = env.register_contract(None, DripStream);
+
+    // Inject the malformed state directly via the legacy per-field keys.
+    // `state::load` reconstructs from these when no `Config` key is present,
+    // so this reproduces exactly what a pre-fix `initialize()` would persist.
+    env.as_contract(&stream_id, || {
+        let storage = env.storage().instance();
+        storage.set(&DataKey::Sender, &sender);
+        storage.set(&DataKey::Recipient, &recipient);
+        storage.set(&DataKey::Token, &token_addr);
+        storage.set(&DataKey::RatePerSecond, &100_i128);
+        storage.set(&DataKey::StartTime, &start_time);
+        storage.set(&DataKey::EndTime, &end_time);
+        storage.set(&DataKey::Withdrawn, &0_i128);
+        storage.set(&DataKey::PausedAt, &0_u64);
+        storage.set(&DataKey::Flags, &0_u32);
+    });
+
+    // Advance ledger past start_time so the release math actually runs.
+    env.ledger().set(LedgerInfo {
+        timestamp: start_time + 10,
+        protocol_version: 21,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 4096,
+        max_entry_ttl: 6_312_000,
+    });
+
+    let result = env.as_contract(&stream_id, || {
+        let info = crate::state::load(&env);
+        crate::math::streamed_amount(&env, &info)
+    });
+
+    // The trap: the settlement math the whole contract depends on is bricked.
+    assert_eq!(result, Err(Error::ArithmeticOverflow));
+}
+
 // ── TTL management ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -499,24 +661,32 @@ fn delayed_consumer_retains_payloads_and_can_detect_sequence_gaps() {
         .collect();
 
     assert_eq!(stream_events.len(), 3);
+
+    // Event topics come back as `Vec<Val>` (which implements `PartialEq`) so
+    // they can be compared directly. Event *data*, however, is a raw `Val`,
+    // which deliberately has no `PartialEq` — comparing two `Val`s directly is
+    // a compile error. Decode each data payload back into concrete Rust types
+    // and compare those instead.
     assert_eq!(
         stream_events[0].1,
         (symbol_short!("paused"), s.sender.clone(), 1_u64).into_val(&s.env)
     );
-    assert_eq!(stream_events[0].2, (paused_at, 1_000_i128).into_val(&s.env));
+    let paused_data: (u64, i128) = stream_events[0].2.try_into_val(&s.env).unwrap();
+    assert_eq!(paused_data, (paused_at, 1_000_i128));
+
     assert_eq!(
         stream_events[1].1,
         (symbol_short!("resumed"), s.sender.clone(), 2_u64).into_val(&s.env)
     );
-    assert_eq!(stream_events[1].2, resumed_at.into_val(&s.env));
+    let resumed_data: u64 = stream_events[1].2.try_into_val(&s.env).unwrap();
+    assert_eq!(resumed_data, resumed_at);
+
     assert_eq!(
         stream_events[2].1,
         (symbol_short!("topped_up"), s.sender.clone(), 3_u64).into_val(&s.env)
     );
-    assert_eq!(
-        stream_events[2].2,
-        (500_i128, balance_after_top_up).into_val(&s.env)
-    );
+    let topped_up_data: (i128, i128) = stream_events[2].2.try_into_val(&s.env).unwrap();
+    assert_eq!(topped_up_data, (500_i128, balance_after_top_up));
 }
 
 // ── Extend duration ─────────────────────────────────────────────────────────
@@ -627,4 +797,164 @@ fn legacy_storage_layout_still_loads_and_tracks_state() {
     assert!(!info.is_paused());
     assert!(!info.is_cancelled());
     assert!(!info.is_clawback_enabled());
+}
+
+// ── Cancellation CEI / settlement invariants (issue #78) ──────────────────────
+//
+// Issue #78 alleged a reentrancy drain in `cancel_batch_streams`. No such
+// function exists in this workspace — the factory only exposes
+// `create_batch_streams`, and cancellation lives entirely in this contract as
+// `cancel()` / `force_cancel()`. Both already commit the cancelled flag before
+// any `token::transfer`, which is the ordering the issue asked for.
+//
+// The specific attack described (a token contract re-entering the stream from
+// a transfer callback) is not expressible on Soroban: the host refuses to
+// re-enter a contract that is already on the call stack, and SEP-41 tokens
+// have no receiver hooks to fire in the first place. So there is no
+// `test_reentrancy_on_batch_cancel` to write — a test cannot construct the
+// precondition.
+//
+// What IS worth locking in is the property that made the attack impossible:
+// after cancellation, the contract holds no balance AND is durably marked
+// cancelled, so there is no state in which a second settlement could pay out
+// again. These tests pin that down so a future refactor cannot silently move a
+// transfer ahead of the state write, or leave a re-drainable remainder behind.
+
+/// `cancel()` must leave zero balance in the contract and a durably-set
+/// cancelled flag. If a transfer were ever moved ahead of `state::save`, an
+/// interleaved settlement would observe `is_cancelled() == false` while the
+/// balance was still non-zero — this asserts that window is closed.
+#[test]
+fn cancel_commits_state_and_drains_balance() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(1800);
+
+    assert!(!s.client.info().is_cancelled());
+    assert!(s.token.balance(&s.client.address) > 0);
+
+    s.client.cancel();
+
+    assert!(s.client.info().is_cancelled());
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Value conservation across `cancel()`: every stroop the contract held is
+/// accounted for by exactly one payout, and nothing is left to drain twice.
+#[test]
+fn cancel_conserves_value_and_leaves_nothing_to_redrain() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(900);
+
+    let escrowed = s.token.balance(&s.client.address);
+    let sender_before = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+
+    s.client.cancel();
+
+    let paid_to_sender = s.token.balance(&s.sender) - sender_before;
+    let paid_to_recipient = s.token.balance(&s.recipient) - recipient_before;
+
+    assert_eq!(paid_to_sender + paid_to_recipient, escrowed);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Same invariant for the recipient-initiated escape hatch.
+#[test]
+fn force_cancel_commits_state_and_drains_balance() {
+    // 60-day stream so the 30-day pause threshold is reached well before
+    // end_time — otherwise `streamed_amount` clamps to end_time and the
+    // pause branch never applies.
+    let s = Setup::new(100, 5_184_000, false);
+    s.advance_secs(1_000);
+    s.client.pause();
+    s.advance_secs(2_592_001); // 30 days + 1s
+
+    let escrowed = s.token.balance(&s.client.address);
+    let sender_before = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+
+    s.client.force_cancel();
+
+    assert!(s.client.info().is_cancelled());
+    assert_eq!(s.token.balance(&s.client.address), 0);
+
+    let paid_to_sender = s.token.balance(&s.sender) - sender_before;
+    let paid_to_recipient = s.token.balance(&s.recipient) - recipient_before;
+    // Only the 1_000s streamed before the pause is owed to the recipient.
+    assert_eq!(paid_to_recipient, 100_000);
+    assert_eq!(paid_to_sender + paid_to_recipient, escrowed);
+}
+
+/// Every value-moving entry point must reject an already-cancelled stream.
+/// This is the guard that makes a second settlement impossible regardless of
+/// how the caller reaches it.
+#[test]
+fn all_settlement_paths_rejected_after_cancel() {
+    let s = Setup::new(100, 3600, true); // clawback enabled
+    s.advance_secs(900);
+    s.client.cancel();
+
+    assert_eq!(s.client.try_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_force_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_clawback(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_withdraw(&1), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Mirror of the above, entered through `force_cancel()` instead.
+#[test]
+fn all_settlement_paths_rejected_after_force_cancel() {
+    let s = Setup::new(100, 5_184_000, true); // clawback enabled
+    s.advance_secs(1_000);
+    s.client.pause();
+    s.advance_secs(2_592_001);
+    s.client.force_cancel();
+
+    assert_eq!(s.client.try_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_force_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_clawback(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_withdraw(&1), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Partial withdrawals before cancellation must not let the recipient be paid
+/// twice for the same streamed seconds.
+#[test]
+fn cancel_after_partial_withdrawal_does_not_double_pay() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(1800); // 180_000 streamed
+
+    s.client.withdraw(&100_000);
+
+    let escrowed = s.token.balance(&s.client.address);
+    let sender_before = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+
+    s.client.cancel();
+
+    let paid_to_recipient = s.token.balance(&s.recipient) - recipient_before;
+    let paid_to_sender = s.token.balance(&s.sender) - sender_before;
+
+    // Recipient is owed only the 80_000 not already withdrawn.
+    assert_eq!(paid_to_recipient, 80_000);
+    assert_eq!(paid_to_sender, 180_000);
+    assert_eq!(paid_to_sender + paid_to_recipient, escrowed);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// The cancelled flag must survive as committed state, not just as a value in
+/// the cancelling invocation's memory — a later, independent invocation has to
+/// observe it.
+#[test]
+fn cancelled_flag_is_durable_across_invocations() {
+    let s = Setup::new(100, 3600, false);
+    s.client.cancel();
+
+    let persisted = s
+        .env
+        .as_contract(&s.client.address, || crate::state::load(&s.env));
+    assert!(persisted.is_cancelled());
+
+    assert_eq!(s.client.withdrawable(), 0);
+    assert_eq!(s.client.streamed_total(), 0);
 }
