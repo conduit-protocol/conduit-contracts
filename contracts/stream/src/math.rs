@@ -24,10 +24,10 @@ pub fn streamed_amount(env: &Env, info: &StreamInfo) -> Result<i128, Error> {
 
     let elapsed = effective_now
         .checked_sub(info.start_time)
-        .ok_or(Error::ArithmeticOverflow)? as i128;
+        .ok_or(Error::ArithmeticOverflow)?;
 
-    info.rate_per_second
-        .checked_mul(elapsed)
+    (info.rate_per_second)
+        .checked_mul(elapsed as i128)
         .ok_or(Error::ArithmeticOverflow)
 }
 

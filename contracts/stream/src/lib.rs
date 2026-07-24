@@ -106,16 +106,23 @@ impl DripStream {
 
     /// Recipient withdraws `amount` tokens.
     pub fn withdraw(env: Env, amount: i128) -> Result<i128, Error> {
+        state::lock(&env)?;
+        let res = Self::_withdraw(&env, amount);
+        state::unlock(&env);
+        res
+    }
+
+    fn _withdraw(env: &Env, amount: i128) -> Result<i128, Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        ttl::bump(&env);
+        ttl::bump(env);
 
-        let info = state::load(&env);
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         info.recipient.require_auth();
 
-        let available = math::withdrawable(&env, &info)?;
+        let available = math::withdrawable(env, &info)?;
         if available == 0 {
             return Err(Error::NothingToWithdraw);
         }
@@ -125,15 +132,18 @@ impl DripStream {
             .withdrawn
             .checked_add(to_send)
             .ok_or(Error::ArithmeticOverflow)?;
-        state::save_withdrawn(&env, new_withdrawn);
+        
+        let mut updated = info.clone();
+        updated.withdrawn = new_withdrawn;
+        state::save(env, &updated);
 
-        let tk = token::Client::new(&env, &info.token);
+        let tk = token::Client::new(env, &info.token);
         let contract_addr = env.current_contract_address();
         let remaining = tk.balance(&contract_addr) - to_send;
 
         tk.transfer(&contract_addr, &info.recipient, &to_send);
 
-        events::withdrawn(&env, &info.recipient, to_send, new_withdrawn, remaining);
+        events::withdrawn(env, &info.recipient, to_send, new_withdrawn, remaining);
         Ok(to_send)
     }
 
@@ -148,28 +158,34 @@ impl DripStream {
     /// the recipient's share MUST be transferred here rather than left for
     /// a later `withdraw()` call.
     pub fn cancel(env: Env) -> Result<(), Error> {
-        ttl::bump(&env);
+        state::lock(&env)?;
+        let res = Self::_cancel(&env);
+        state::unlock(&env);
+        res
+    }
 
-        let info = state::load(&env);
+    fn _cancel(env: &Env) -> Result<(), Error> {
+        ttl::bump(env);
+
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         info.sender.require_auth();
 
-        let tk = token::Client::new(&env, &info.token);
+        let tk = token::Client::new(env, &info.token);
         let contract_addr = env.current_contract_address();
         let balance = tk.balance(&contract_addr);
 
         // How many tokens the recipient has earned but not yet withdrawn.
-        let streamed = math::streamed_amount(&env, &info)?;
+        let streamed = math::streamed_amount(env, &info)?;
         let owed_to_recipient = (streamed - info.withdrawn).max(0).min(balance);
         let refund_to_sender = (balance - owed_to_recipient).max(0);
 
         // Mark cancelled before any transfers to prevent re-entrancy
         // (Soroban's execution model already prevents re-entrancy, but this
         // is still the correct ordering for state-machine correctness).
-        state::set_cancelled(&env);
         let mut cancelled_info = info.clone();
         cancelled_info.flags |= FLAG_CANCELLED;
-        state::save(&env, &cancelled_info);
+        state::save(env, &cancelled_info);
 
         // Pay the recipient their earned-but-unwithdrawn portion.
         if owed_to_recipient > 0 {
@@ -181,15 +197,22 @@ impl DripStream {
             tk.transfer(&contract_addr, &info.sender, &refund_to_sender);
         }
 
-        events::cancelled(&env, &info.sender, refund_to_sender, info.withdrawn);
+        events::cancelled(env, &info.sender, refund_to_sender, info.withdrawn);
         Ok(())
     }
 
     /// Sender pauses the stream.
     pub fn pause(env: Env) -> Result<(), Error> {
-        ttl::bump(&env);
+        state::lock(&env)?;
+        let res = Self::_pause(&env);
+        state::unlock(&env);
+        res
+    }
 
-        let info = state::load(&env);
+    fn _pause(env: &Env) -> Result<(), Error> {
+        ttl::bump(env);
+
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         if info.is_paused() {
             return Err(Error::AlreadyPaused);
@@ -197,7 +220,7 @@ impl DripStream {
         info.sender.require_auth();
 
         let now = env.ledger().timestamp();
-        let w = math::withdrawable(&env, &info)?;
+        let w = math::withdrawable(env, &info)?;
 
         // Single consolidated save — no separate `state::set_paused()` call
         // (which would save the same struct a second time) and no direct
@@ -206,17 +229,24 @@ impl DripStream {
         let mut updated = info.clone();
         updated.flags |= FLAG_PAUSED;
         updated.paused_at = now;
-        state::save(&env, &updated);
+        state::save(env, &updated);
 
-        events::paused(&env, &info.sender, now, w);
+        events::paused(env, &info.sender, now, w);
         Ok(())
     }
 
     /// Sender resumes a paused stream.
     pub fn resume(env: Env) -> Result<(), Error> {
-        ttl::bump(&env);
+        state::lock(&env)?;
+        let res = Self::_resume(&env);
+        state::unlock(&env);
+        res
+    }
 
-        let info = state::load(&env);
+    fn _resume(env: &Env) -> Result<(), Error> {
+        ttl::bump(env);
+
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         if !info.is_paused() {
             return Err(Error::NotPaused);
@@ -240,9 +270,9 @@ impl DripStream {
         if info.end_time > 0 {
             updated.end_time = info.end_time + paused_duration;
         }
-        state::save(&env, &updated);
+        state::save(env, &updated);
 
-        events::resumed(&env, &info.sender, now);
+        events::resumed(env, &info.sender, now);
         Ok(())
     }
 
@@ -254,23 +284,30 @@ impl DripStream {
     /// as possible instead of paying for storage-extension instructions
     /// it never needed.
     pub fn top_up(env: Env, amount: i128) -> Result<(), Error> {
+        state::lock(&env)?;
+        let res = Self::_top_up(&env, amount);
+        state::unlock(&env);
+        res
+    }
+
+    fn _top_up(env: &Env, amount: i128) -> Result<(), Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
 
-        let info = state::load(&env);
+        let info = state::load(env);
         info.sender.require_auth();
 
-        ttl::bump(&env);
+        ttl::bump(env);
         state::assert_not_cancelled(&info)?;
 
-        let tk = token::Client::new(&env, &info.token);
+        let tk = token::Client::new(env, &info.token);
         let contract_addr = env.current_contract_address();
 
         tk.transfer(&info.sender, &contract_addr, &amount);
 
         let new_balance = tk.balance(&contract_addr);
-        events::topped_up(&env, &info.sender, amount, new_balance);
+        events::topped_up(env, &info.sender, amount, new_balance);
         Ok(())
     }
 
@@ -279,12 +316,19 @@ impl DripStream {
     /// Transfers the exact required deposit (rate_per_second × extra_time_seconds)
     /// from the sender into the contract and updates `end_time`.
     pub fn extend_duration(env: Env, extra_time_seconds: u64) -> Result<(), Error> {
+        state::lock(&env)?;
+        let res = Self::_extend_duration(&env, extra_time_seconds);
+        state::unlock(&env);
+        res
+    }
+
+    fn _extend_duration(env: &Env, extra_time_seconds: u64) -> Result<(), Error> {
         if extra_time_seconds == 0 {
             return Err(Error::InvalidTimeRange);
         }
-        ttl::bump(&env);
+        ttl::bump(env);
 
-        let info = state::load(&env);
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         info.sender.require_auth();
 
@@ -299,7 +343,7 @@ impl DripStream {
             .checked_mul(rate_per_sec)
             .ok_or(Error::ArithmeticOverflow)?;
 
-        let tk = token::Client::new(&env, &info.token);
+        let tk = token::Client::new(env, &info.token);
         let contract_addr = env.current_contract_address();
 
         // Transfer required deposit from sender into the contract
@@ -314,31 +358,38 @@ impl DripStream {
         // (already covered by the consolidated save).
         let mut updated = info.clone();
         updated.end_time = end_time;
-        state::save(&env, &updated);
+        state::save(env, &updated);
 
         // Emit topped_up event to indicate funds were deposited
         let new_balance = tk.balance(&contract_addr);
-        events::topped_up(&env, &info.sender, required_deposit, new_balance);
+        events::topped_up(env, &info.sender, required_deposit, new_balance);
 
         Ok(())
     }
 
     /// Sender reclaims unstreamed tokens (only if clawback was enabled).
     pub fn clawback(env: Env) -> Result<i128, Error> {
-        ttl::bump(&env);
+        state::lock(&env)?;
+        let res = Self::_clawback(&env);
+        state::unlock(&env);
+        res
+    }
 
-        let info = state::load(&env);
+    fn _clawback(env: &Env) -> Result<i128, Error> {
+        ttl::bump(env);
+
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         if !info.is_clawback_enabled() {
             return Err(Error::ClawbackDisabled);
         }
         info.sender.require_auth();
 
-        let streamed = math::streamed_amount(&env, &info)?;
+        let streamed = math::streamed_amount(env, &info)?;
         let owed = (streamed - info.withdrawn).max(0);
         let contract_addr = env.current_contract_address();
 
-        let tk = token::Client::new(&env, &info.token);
+        let tk = token::Client::new(env, &info.token);
         let balance = tk.balance(&contract_addr);
         let amount = (balance - owed).max(0);
 
@@ -346,7 +397,7 @@ impl DripStream {
             tk.transfer(&contract_addr, &info.sender, &amount);
         }
 
-        events::clawback(&env, &info.sender, amount);
+        events::clawback(env, &info.sender, amount);
         Ok(amount)
     }
 
@@ -367,11 +418,18 @@ impl DripStream {
     /// Settles atomically like `cancel()`: earned tokens go to recipient,
     /// unstreamed refund goes to sender.
     pub fn force_cancel(env: Env) -> Result<(), Error> {
+        state::lock(&env)?;
+        let res = Self::_force_cancel(&env);
+        state::unlock(&env);
+        res
+    }
+
+    fn _force_cancel(env: &Env) -> Result<(), Error> {
         const PAUSE_THRESHOLD_SECS: u64 = 2_592_000; // 30 days
 
-        ttl::bump(&env);
+        ttl::bump(env);
 
-        let info = state::load(&env);
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         if !info.is_paused() {
             return Err(Error::NotPaused);
@@ -385,18 +443,17 @@ impl DripStream {
 
         info.recipient.require_auth();
 
-        let tk = token::Client::new(&env, &info.token);
+        let tk = token::Client::new(env, &info.token);
         let contract_addr = env.current_contract_address();
         let balance = tk.balance(&contract_addr);
 
-        let streamed = math::streamed_amount(&env, &info)?;
+        let streamed = math::streamed_amount(env, &info)?;
         let owed_to_recipient = (streamed - info.withdrawn).max(0).min(balance);
         let refund_to_sender = (balance - owed_to_recipient).max(0);
 
-        state::set_cancelled(&env);
         let mut cancelled_info = info.clone();
         cancelled_info.flags |= FLAG_CANCELLED;
-        state::save(&env, &cancelled_info);
+        state::save(env, &cancelled_info);
 
         if owed_to_recipient > 0 {
             tk.transfer(&contract_addr, &info.recipient, &owed_to_recipient);
@@ -405,7 +462,7 @@ impl DripStream {
             tk.transfer(&contract_addr, &info.sender, &refund_to_sender);
         }
 
-        events::cancelled(&env, &info.sender, refund_to_sender, info.withdrawn);
+        events::cancelled(env, &info.sender, refund_to_sender, info.withdrawn);
         Ok(())
     }
 
@@ -415,16 +472,23 @@ impl DripStream {
     /// to the new recipient. The sender is intentionally not notified
     /// on-chain (use events); governance can add a sender-veto in future.
     pub fn transfer_recipient(env: Env, new_recipient: Address) -> Result<(), Error> {
-        ttl::bump(&env);
+        state::lock(&env)?;
+        let res = Self::_transfer_recipient(&env, new_recipient);
+        state::unlock(&env);
+        res
+    }
 
-        let info = state::load(&env);
+    fn _transfer_recipient(env: &Env, new_recipient: Address) -> Result<(), Error> {
+        ttl::bump(env);
+
+        let info = state::load(env);
         state::assert_not_cancelled(&info)?;
         info.recipient.require_auth();
 
         let mut updated = info.clone();
         updated.recipient = new_recipient.clone();
-        state::save(&env, &updated);
-        events::recipient_transferred(&env, &info.recipient, &new_recipient);
+        state::save(env, &updated);
+        events::recipient_transferred(env, &info.recipient, &new_recipient);
         Ok(())
     }
 

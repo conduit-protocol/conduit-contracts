@@ -26,6 +26,8 @@ pub enum DataKey {
     /// Consumers compare this value with the last sequence they processed
     /// after reconnecting so missing ledger events cannot go unnoticed.
     EventSequence,
+    /// Lock for re-entrancy protection and concurrency control.
+    Guard,
 }
 
 #[contracttype]

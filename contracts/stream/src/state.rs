@@ -1,6 +1,6 @@
 use soroban_sdk::Env;
 
-use crate::storage::{DataKey, StreamInfo, FLAG_CANCELLED, FLAG_CLAWBACK_ENABLED, FLAG_PAUSED};
+use crate::storage::{DataKey, StreamInfo, FLAG_CANCELLED, FLAG_CLAWBACK_ENABLED};
 use crate::Error;
 
 /// Load the full stream state in a single storage read.
@@ -59,43 +59,24 @@ pub fn save(env: &Env, info: &StreamInfo) {
     s.set(&DataKey::Flags, &info.flags);
 }
 
-/// Update only the `withdrawn` counter without touching the other fields.
-///
-/// Uses load-modify-save so the single-struct layout is maintained.
-pub fn save_withdrawn(env: &Env, amount: i128) {
-    let mut info = load(env);
-    info.withdrawn = amount;
-    save(env, &info);
-}
-
-/// Mark the stream as paused or resumed.
-///
-/// No longer called by `DripStream::pause`/`resume` directly — those
-/// methods now build an updated `StreamInfo` and call `state::save` once.
-/// Retained as a re-export-able helper because the legacy dual-write flow
-/// (the one this commit removed) referenced it; downstream call sites should
-/// prefer building the struct in-line and calling `save` directly.
-#[allow(dead_code)]
-pub fn set_paused(env: &Env, paused: bool) {
-    let mut info = load(env);
-    if paused {
-        info.flags |= FLAG_PAUSED;
-    } else {
-        info.flags &= !FLAG_PAUSED;
-    }
-    save(env, &info);
-}
-
-pub fn set_cancelled(env: &Env) {
-    let mut info = load(env);
-    info.flags |= FLAG_CANCELLED;
-    save(env, &info);
-}
-
 pub fn assert_not_cancelled(info: &StreamInfo) -> Result<(), Error> {
     if info.is_cancelled() {
         Err(Error::StreamCancelled)
     } else {
         Ok(())
     }
+}
+
+pub fn lock(env: &Env) -> Result<(), Error> {
+    let s = env.storage().instance();
+    let is_locked: bool = s.get(&DataKey::Guard).unwrap_or(false);
+    if is_locked {
+        return Err(Error::ReentrancyForbidden);
+    }
+    s.set(&DataKey::Guard, &true);
+    Ok(())
+}
+
+pub fn unlock(env: &Env) {
+    env.storage().instance().set(&DataKey::Guard, &false);
 }

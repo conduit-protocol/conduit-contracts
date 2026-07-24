@@ -19,4 +19,5 @@ pub enum Error {
     PauseThresholdNotMet = 13,
     AlreadyInitialized = 14,
     InvalidAmount = 15,
+    ReentrancyForbidden = 16,
 }
