@@ -25,6 +25,9 @@ drip-factory  = { path = "contracts/factory",  features = ["testutils"] }
 drip-governor = { path = "contracts/governor", features = ["testutils"] }
 soroban-sdk   = { workspace = true, features = ["testutils"] }
 
+[dependencies]
+soroban-sdk = { workspace = true }
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true
