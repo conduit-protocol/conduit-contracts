@@ -21,4 +21,7 @@ pub enum Error {
     /// `unpause` was called while the factory was not paused.
     NotPaused = 13,
     DurationExceedsMax = 14,
+    /// The governor contract did not respond (archived, not initialised,
+    /// or a host-level error occurred during the cross-contract call).
+    GovernorNotResponding = 15,
 }
