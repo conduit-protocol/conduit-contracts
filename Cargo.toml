@@ -5,6 +5,7 @@ members = [
     "contracts/stream",
     "contracts/factory",
     "contracts/governor",
+    "contracts/oracle",
 ]
 
 [workspace.dependencies]
@@ -23,6 +24,7 @@ autoexamples = false
 drip-stream   = { path = "contracts/stream",   features = ["testutils"] }
 drip-factory  = { path = "contracts/factory",  features = ["testutils"] }
 drip-governor = { path = "contracts/governor", features = ["testutils"] }
+drip-oracle   = { path = "contracts/oracle",   features = ["testutils"] }
 soroban-sdk   = { workspace = true, features = ["testutils"] }
 
 [profile.release]
