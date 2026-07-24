@@ -16,6 +16,8 @@ pub enum Error {
     OracleStalePrice = 1001,
     OracleNotConfigured = 1002,
     InvalidPrice = 1003,
+    OracleLocked = 1004,
+    CalculationOverflow = 1005,
 }
 
 #[contract]
@@ -29,11 +31,27 @@ impl TwapOracleIntegration {
     }
 
     pub fn get_twap_price(env: Env) -> Result<u64, Error> {
-        let config: OracleConfig = env
+        let lock_key = soroban_sdk::symbol_short!("O_Lock");
+        let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
+        if is_locked {
+            // Resolve gracefully when concurrent asynchronous hooks fire
+            return Err(Error::OracleLocked);
+        }
+        
+        env.storage().instance().set(&lock_key, &true);
+
+        let config_res: Option<OracleConfig> = env
             .storage()
             .instance()
-            .get(&soroban_sdk::symbol_short!("OracleCfg"))
-            .ok_or(Error::OracleNotConfigured)?;
+            .get(&soroban_sdk::symbol_short!("OracleCfg"));
+            
+        let config = match config_res {
+            Some(cfg) => cfg,
+            None => {
+                env.storage().instance().set(&lock_key, &false);
+                return Err(Error::OracleNotConfigured);
+            }
+        };
 
         // Invoke the external Oracle contract securely.
         // Important: Ensure the oracle_address is a trusted and whitelisted contract.
@@ -44,16 +62,19 @@ impl TwapOracleIntegration {
         // Real implementation would be: 
         // let price_data: (u64, u64) = env.invoke_contract(&config.oracle_address, &soroban_sdk::symbol_short!("get_twap"), ());
         let mock_price: u64 = 50_000_000; 
-        let last_updated: u64 = current_time - 30; // 30 seconds ago
+        let last_updated: u64 = current_time.saturating_sub(30); // 30 seconds ago
 
-        if current_time - last_updated > config.max_staleness {
+        if current_time.saturating_sub(last_updated) > config.max_staleness {
+            env.storage().instance().set(&lock_key, &false);
             return Err(Error::OracleStalePrice);
         }
 
         if mock_price == 0 {
+            env.storage().instance().set(&lock_key, &false);
             return Err(Error::InvalidPrice);
         }
 
+        env.storage().instance().set(&lock_key, &false);
         Ok(mock_price)
     }
 
@@ -67,8 +88,9 @@ impl TwapOracleIntegration {
             .unwrap();
 
         // Convert a nominal token amount into its fiat equivalent
-        let precision = 10u128.pow(config.decimals);
-        let value = (token_amount as u128 * current_price as u128) / precision;
+        let precision = 10u128.checked_pow(config.decimals).ok_or(Error::CalculationOverflow)?;
+        let token_val = (token_amount as u128).checked_mul(current_price as u128).ok_or(Error::CalculationOverflow)?;
+        let value = token_val.checked_div(precision).ok_or(Error::CalculationOverflow)?;
         
         Ok(value as u64)
     }
