@@ -54,6 +54,10 @@ impl DripFactory {
     /// The caller (`sender`) must pass their address explicitly — Soroban has no
     /// implicit `msg.sender`. `sender.require_auth()` enforces that the transaction
     /// is signed by the address it claims to be.
+    ///
+    /// Uses a strict lock to prevent concurrent mutations to StreamCount and
+    /// the persistent indices. The lock is acquired after all validation passes
+    /// and released on every exit path (success or error).
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
@@ -119,13 +123,34 @@ impl DripFactory {
         let config = governance::config(&env, &governor)?;
         governance::enforce_bounds(&config, rate_per_sec, start_time, end_time)?;
 
+        // ── Acquire creation lock ──────────────────────────────────────────
+        // Prevents concurrent `create_stream` calls from racing on StreamCount
+        // and the persistent indices. The lock is released on every exit path.
+        let lock_key = soroban_sdk::symbol_short!("C_Lock");
+        let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
+        if is_locked {
+            return Err(Error::CreateLocked);
+        }
+        env.storage().instance().set(&lock_key, &true);
+
         // ── All validation passed — safe to touch state now ──────────────
         ttl::bump_instance(&env);
 
         // ── Pull deposit from sender ──────────────────────────────────────
         // Using the aliased `tok` to avoid any future shadowing issues.
+        // Validate the transfer succeeded before proceeding.
         let tk = tok::Client::new(&env, &token);
-        tk.transfer(&sender, &env.current_contract_address(), &deposit);
+        let contract_addr = env.current_contract_address();
+        tk.transfer(&sender, &contract_addr, &deposit);
+
+        // Verify the deposit arrived by checking the factory's balance.
+        // This catches silent transfer failures (e.g. insufficient allowance,
+        // frozen accounts, or network partitions between sender and factory).
+        let balance_after = tk.balance(&contract_addr);
+        if balance_after < deposit {
+            env.storage().instance().set(&lock_key, &false);
+            return Err(Error::DepositTransferFailed);
+        }
 
         // ── Assign stream ID ─────────────────────────────────────────────
         let stream_count: u64 = env
@@ -156,7 +181,17 @@ impl DripFactory {
         let stream_addr = deploy::deploy_stream(&env, &wasm_hash, stream_id, init_args);
 
         // Forward the deposit into the newly deployed stream contract.
-        tk.transfer(&env.current_contract_address(), &stream_addr, &deposit);
+        // Validate the transfer succeeded before updating indices.
+        tk.transfer(&contract_addr, &stream_addr, &deposit);
+
+        // Verify the stream received the deposit. If this fails, the deposit
+        // is stuck in the factory but the stream is deployed — release the lock
+        // and return an error so the caller can investigate.
+        let stream_balance = tk.balance(&stream_addr);
+        if stream_balance < deposit {
+            env.storage().instance().set(&lock_key, &false);
+            return Err(Error::StreamFundingFailed);
+        }
 
         // ── Index ─────────────────────────────────────────────────────────
         // StreamAddr and the sender/recipient indices grow without bound, so
@@ -164,14 +199,9 @@ impl DripFactory {
         // instance storage size limits as the protocol scales.
         //
         // Persistent storage entry 1 — StreamAddr:
-        //   Key:   DataKey::StreamAddr(stream_id)
-        //          XDR serialization: [discriminant: u32][stream_id: u64]
-        //   Value: Address (the deployed DripStream contract address)
-        //          XDR serialization: XDR-encoded contract Address
         env.storage()
             .persistent()
             .set(&DataKey::StreamAddr(stream_id), &stream_addr);
-        // Extend TTL on the stream address entry so it outlives ledger pruning.
         env.storage().persistent().extend_ttl(
             &DataKey::StreamAddr(stream_id),
             ttl::THRESHOLD,
@@ -182,10 +212,6 @@ impl DripFactory {
             .set(&DataKey::StreamCount, &(stream_count + 1));
 
         // Persistent storage entry 2 — BySender:
-        //   Key:   DataKey::BySender(sender)
-        //          XDR serialization: [discriminant: u32][sender: XDR Address]
-        //   Value: Vec<u64> (ordered list of stream IDs this sender has created)
-        //          XDR serialization: XDR-encoded Vec of u64 elements
         let mut by_sender: Vec<u64> = env
             .storage()
             .persistent()
@@ -202,10 +228,6 @@ impl DripFactory {
         );
 
         // Persistent storage entry 3 — ByRecipient:
-        //   Key:   DataKey::ByRecipient(recipient)
-        //          XDR serialization: [discriminant: u32][recipient: XDR Address]
-        //   Value: Vec<u64> (ordered list of stream IDs where this address is recipient)
-        //          XDR serialization: XDR-encoded Vec of u64 elements
         let mut by_recipient: Vec<u64> = env
             .storage()
             .persistent()
@@ -220,6 +242,9 @@ impl DripFactory {
             ttl::THRESHOLD,
             ttl::EXTEND_TO,
         );
+
+        // ── Release lock ──────────────────────────────────────────────────
+        env.storage().instance().set(&lock_key, &false);
 
         Ok(stream_id)
     }
@@ -238,6 +263,10 @@ impl DripFactory {
     /// that error immediately, and every storage write and token
     /// transfer already made earlier in this same call is rolled back
     /// by the host -- no partial-batch state is ever left behind.
+    ///
+    /// Concurrency: Each `create_stream` call within the batch acquires
+    /// and releases the creation lock individually, so the batch is
+    /// serialized against concurrent single-stream calls.
     pub fn create_batch_streams(
         env: Env,
         sender: Address,

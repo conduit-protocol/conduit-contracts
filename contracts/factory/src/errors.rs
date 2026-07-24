@@ -28,4 +28,11 @@ pub enum Error {
     EmptyBatch = 16,
     /// `create_batch_streams` requests exceeded `MAX_BATCH_SIZE`.
     BatchTooLarge = 17,
+    /// Another `create_stream` or `create_batch_streams` call is in progress.
+    /// The caller should retry after a short delay.
+    CreateLocked = 18,
+    /// The deposit transfer from the sender to the factory failed.
+    DepositTransferFailed = 19,
+    /// The deposit transfer from the factory to the deployed stream failed.
+    StreamFundingFailed = 20,
 }

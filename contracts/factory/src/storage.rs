@@ -75,6 +75,13 @@ pub enum DataKey {
     /// Value: `u64` — the last stream ID whose persistent `StreamAddr` TTL
     /// was bumped by the walker. Missing entry is treated as `0`.
     LastBumpedId,
+
+    /// **Instance storage.** Lock flag for atomic stream creation.
+    /// Key: `DataKey::CreateLock` (no inner type, discriminant only)
+    /// Value: `bool` — `true` while a `create_stream` or `create_batch_streams`
+    /// call is in progress. Prevents concurrent mutations to StreamCount and
+    /// the persistent indices. Released on every exit path.
+    CreateLock,
 }
 
 /// A single stream configuration within a `create_batch_streams` call.
