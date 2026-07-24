@@ -24,4 +24,8 @@ pub enum Error {
     /// The governor contract did not respond (archived, not initialised,
     /// or a host-level error occurred during the cross-contract call).
     GovernorNotResponding = 15,
+    /// `create_batch_streams` was called with an empty `requests` vector.
+    EmptyBatch = 16,
+    /// `create_batch_streams` requests exceeded `MAX_BATCH_SIZE`.
+    BatchTooLarge = 17,
 }

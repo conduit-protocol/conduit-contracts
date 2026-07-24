@@ -14,7 +14,14 @@ use soroban_sdk::{
 };
 
 pub use errors::Error;
+pub use storage::BatchStreamRequest;
 use storage::DataKey;
+
+/// Maximum number of streams accepted by a single `create_batch_streams`
+/// call. Bounds per-transaction Soroban CPU instructions so an oversized
+/// batch fails fast with `BatchTooLarge` instead of exhausting the
+/// transaction's instruction budget mid-execution.
+pub const MAX_BATCH_SIZE: u32 = 100;
 
 #[contract]
 pub struct DripFactory;
@@ -215,6 +222,51 @@ impl DripFactory {
         );
 
         Ok(stream_id)
+    }
+
+    /// Create multiple streams in one transaction, all funded and
+    /// authorized by the same `sender`.
+    ///
+    /// Reuses `create_stream` verbatim for each request, so validation,
+    /// governor-bound enforcement, the deposit transfer, deployment, and
+    /// registry indexing are all identical to the single-stream path --
+    /// including whatever per-stream signals `create_stream` /
+    /// `DripStream::initialize` already produce.
+    ///
+    /// Atomicity: Soroban transactions are all-or-nothing at the host
+    /// level. If any request fails validation, the `?` below propagates
+    /// that error immediately, and every storage write and token
+    /// transfer already made earlier in this same call is rolled back
+    /// by the host -- no partial-batch state is ever left behind.
+    pub fn create_batch_streams(
+        env: Env,
+        sender: Address,
+        requests: Vec<BatchStreamRequest>,
+        clawback: bool,
+    ) -> Result<Vec<u64>, Error> {
+        if requests.is_empty() {
+            return Err(Error::EmptyBatch);
+        }
+        if requests.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut stream_ids = Vec::new(&env);
+        for request in requests.iter() {
+            let stream_id = Self::create_stream(
+                env.clone(),
+                sender.clone(),
+                request.recipient,
+                request.token,
+                request.deposit,
+                request.rate_per_sec,
+                request.start_time,
+                request.end_time,
+                clawback,
+            )?;
+            stream_ids.push_back(stream_id);
+        }
+        Ok(stream_ids)
     }
 
     pub fn stream_address(env: Env, stream_id: u64) -> Option<Address> {
