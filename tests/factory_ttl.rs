@@ -76,7 +76,12 @@ fn synthesize_stream_entries(env: &Env, factory: &Address, count: u64) {
 
 // ─── Invariant 1 — (threshold <= extend_to) at construction ───────────────────
 
+// Both operands are `pub const u32`, so the comparison is constant-valued.
+// Clippy's `assertions_on_constants` flags this; allow it here because the
+// test exists as a runtime canary against a future bump that flips the
+// relationship between EXTEND_TO and THRESHOLD mid-version.
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn extend_ttl_invariant_threshold_lt_or_eq_extend_to_at_construction() {
     assert!(
         ttl::EXTEND_TO >= ttl::THRESHOLD,

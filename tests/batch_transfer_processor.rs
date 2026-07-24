@@ -35,10 +35,7 @@ fn deploy_processor(env: &Env) -> BatchTransferProcessorClient<'_> {
 /// own default of "unlocked".
 fn lock_state(env: &Env, client: &BatchTransferProcessorClient<'_>) -> bool {
     env.as_contract(&client.address, || {
-        env.storage()
-            .instance()
-            .get(&LOCK_KEY)
-            .unwrap_or(false)
+        env.storage().instance().get(&LOCK_KEY).unwrap_or(false)
     })
 }
 
@@ -140,8 +137,7 @@ fn process_batch_rejects_when_lock_is_held() {
 
 #[test]
 fn error_type_carries_required_traits_and_named_discriminants() {
-    fn assert_traits<T: Copy + Clone + core::fmt::Debug + Eq + PartialEq +
-        PartialOrd + Ord>() {}
+    fn assert_traits<T: Copy + Clone + core::fmt::Debug + Eq + PartialEq + PartialOrd + Ord>() {}
     assert_traits::<Error>();
     // Lock in the discriminant values so client integrators (and
     // downstream error handling in tests) cannot silently drift.
