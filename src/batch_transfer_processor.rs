@@ -1,7 +1,8 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, Env};
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
     ProcessorLocked = 2001,
     CalculationOverflow = 2002,
