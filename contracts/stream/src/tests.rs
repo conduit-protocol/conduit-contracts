@@ -8,7 +8,7 @@ use std::boxed::Box;
 use soroban_sdk::{
     symbol_short,
     testutils::{storage::Instance as _, Address as _, Events as _, Ledger, LedgerInfo},
-    token, Address, Env, IntoVal,
+    token, Address, Env, IntoVal, TryIntoVal,
 };
 
 use crate::{storage::DataKey, DripStream, DripStreamClient, Error};
@@ -361,6 +361,168 @@ fn re_initializing_an_active_stream_panics() {
         .initialize(&attacker, &attacker, &s.token.address, &1, &0, &0, &false);
 }
 
+// ── Time-range boundary guard (issue #81) ────────────────────────────────────
+
+/// A bounded stream whose `end_time` is *before* `start_time` is malformed.
+/// `initialize()` must reject it at the boundary with `InvalidTimeRange`
+/// (error #8) before any state is persisted — otherwise the escrowed balance
+/// gets permanently locked (see `malformed_time_range_would_lock_funds`).
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn initialize_rejects_end_time_before_start() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    let now: u64 = 1_000_000;
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &now,           // start_time
+        &(now - 3_600), // end_time BEFORE start_time → malformed
+        &false,
+    );
+}
+
+/// A zero-duration bounded stream (`end_time == start_time`) releases nothing
+/// yet still escrows tokens — the same "empty stream" class the zero-rate
+/// guard already rejects. It must fail with `InvalidTimeRange` (error #8).
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn initialize_rejects_end_time_equal_start() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    let now: u64 = 1_000_000;
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &now, // start_time
+        &now, // end_time == start_time → zero-duration, malformed
+        &false,
+    );
+}
+
+/// The guard must NOT reject legitimate open-ended streams (`end_time == 0`).
+/// This is the regression fence around the boundary check: `0` is a sentinel
+/// for "no end", not a time that precedes `start_time`.
+#[test]
+fn initialize_accepts_open_ended_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    let now: u64 = 1_000_000;
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &now,
+        &0, // open-ended → valid
+        &false,
+    );
+
+    let inf = client.info();
+    assert_eq!(inf.end_time, 0);
+    assert_eq!(inf.start_time, now);
+}
+
+/// Documents the exact failure mode the boundary check prevents.
+///
+/// We inject malformed state (`end_time < start_time`) directly through the
+/// legacy per-field storage keys, bypassing `initialize()`'s guard, then show
+/// that once ledger time passes `start_time` the release math underflows and
+/// surfaces `ArithmeticOverflow`. In a real deployment that same error fires
+/// inside `withdraw`, `cancel`, and `clawback`, so the escrow could be neither
+/// paid out nor refunded — the funds would be locked forever. The guard in
+/// `initialize()` makes this state unreachable in the first place.
+#[test]
+fn malformed_time_range_would_lock_funds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let start_time: u64 = 1_000_000;
+    let end_time: u64 = start_time - 3_600; // end BEFORE start — malformed
+
+    let stream_id = env.register_contract(None, DripStream);
+
+    // Inject the malformed state directly via the legacy per-field keys.
+    // `state::load` reconstructs from these when no `Config` key is present,
+    // so this reproduces exactly what a pre-fix `initialize()` would persist.
+    env.as_contract(&stream_id, || {
+        let storage = env.storage().instance();
+        storage.set(&DataKey::Sender, &sender);
+        storage.set(&DataKey::Recipient, &recipient);
+        storage.set(&DataKey::Token, &token_addr);
+        storage.set(&DataKey::RatePerSecond, &100_i128);
+        storage.set(&DataKey::StartTime, &start_time);
+        storage.set(&DataKey::EndTime, &end_time);
+        storage.set(&DataKey::Withdrawn, &0_i128);
+        storage.set(&DataKey::PausedAt, &0_u64);
+        storage.set(&DataKey::Flags, &0_u32);
+    });
+
+    // Advance ledger past start_time so the release math actually runs.
+    env.ledger().set(LedgerInfo {
+        timestamp: start_time + 10,
+        protocol_version: 21,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 4096,
+        max_entry_ttl: 6_312_000,
+    });
+
+    let result = env.as_contract(&stream_id, || {
+        let info = crate::state::load(&env);
+        crate::math::streamed_amount(&env, &info)
+    });
+
+    // The trap: the settlement math the whole contract depends on is bricked.
+    assert_eq!(result, Err(Error::ArithmeticOverflow));
+}
+
 // ── TTL management ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -499,24 +661,32 @@ fn delayed_consumer_retains_payloads_and_can_detect_sequence_gaps() {
         .collect();
 
     assert_eq!(stream_events.len(), 3);
+
+    // Event topics come back as `Vec<Val>` (which implements `PartialEq`) so
+    // they can be compared directly. Event *data*, however, is a raw `Val`,
+    // which deliberately has no `PartialEq` — comparing two `Val`s directly is
+    // a compile error. Decode each data payload back into concrete Rust types
+    // and compare those instead.
     assert_eq!(
         stream_events[0].1,
         (symbol_short!("paused"), s.sender.clone(), 1_u64).into_val(&s.env)
     );
-    assert_eq!(stream_events[0].2, (paused_at, 1_000_i128).into_val(&s.env));
+    let paused_data: (u64, i128) = stream_events[0].2.try_into_val(&s.env).unwrap();
+    assert_eq!(paused_data, (paused_at, 1_000_i128));
+
     assert_eq!(
         stream_events[1].1,
         (symbol_short!("resumed"), s.sender.clone(), 2_u64).into_val(&s.env)
     );
-    assert_eq!(stream_events[1].2, resumed_at.into_val(&s.env));
+    let resumed_data: u64 = stream_events[1].2.try_into_val(&s.env).unwrap();
+    assert_eq!(resumed_data, resumed_at);
+
     assert_eq!(
         stream_events[2].1,
         (symbol_short!("topped_up"), s.sender.clone(), 3_u64).into_val(&s.env)
     );
-    assert_eq!(
-        stream_events[2].2,
-        (500_i128, balance_after_top_up).into_val(&s.env)
-    );
+    let topped_up_data: (i128, i128) = stream_events[2].2.try_into_val(&s.env).unwrap();
+    assert_eq!(topped_up_data, (500_i128, balance_after_top_up));
 }
 
 // ── Extend duration ─────────────────────────────────────────────────────────
