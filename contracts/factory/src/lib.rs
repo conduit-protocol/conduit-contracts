@@ -2,10 +2,13 @@
 
 mod deploy;
 mod errors;
+mod events;
 mod governance;
 mod pause;
 mod query;
 pub mod storage;
+#[cfg(test)]
+mod tests;
 pub mod ttl;
 
 // Import `token` as `tok` to avoid shadowing by any `token: Address` parameter.
@@ -364,6 +367,11 @@ impl DripFactory {
         // period.
         ttl::bump_persistent_bucket(&env);
         pause::set_paused(&env, true);
+        // Emit a positive signal of the transition so off-chain indexers and
+        // relayers can confirm the halt committed (see `events::paused`),
+        // rather than inferring it from a bare `Ok` that a dropped or
+        // rate-limited RPC response may have lost.
+        events::paused(&env, &governor, env.ledger().timestamp());
         Ok(())
     }
 
@@ -386,6 +394,9 @@ impl DripFactory {
         // back online and `create_stream` hasn't yet resumed.
         ttl::bump_persistent_bucket(&env);
         pause::set_paused(&env, false);
+        // Emit a positive signal of the transition so off-chain infra can
+        // confirm creation resumed (see `events::unpaused`).
+        events::unpaused(&env, &governor, env.ledger().timestamp());
         Ok(())
     }
 
