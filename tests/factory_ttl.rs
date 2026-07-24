@@ -76,7 +76,12 @@ fn synthesize_stream_entries(env: &Env, factory: &Address, count: u64) {
 
 // ─── Invariant 1 — (threshold <= extend_to) at construction ───────────────────
 
+// Both operands are `pub const u32`, so the comparison is constant-valued.
+// Clippy's `assertions_on_constants` flags this; allow it here because the
+// test exists as a runtime canary against a future bump that flips the
+// relationship between EXTEND_TO and THRESHOLD mid-version.
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn extend_ttl_invariant_threshold_lt_or_eq_extend_to_at_construction() {
     assert!(
         ttl::EXTEND_TO >= ttl::THRESHOLD,
@@ -119,9 +124,11 @@ fn extend_ttl_invariant_rejects_threshold_gt_extend_to() {
             // Use the production's own value pair, just inverted, so a future
             // bump to `threshold = 200_000, extend_to = 100_000` here is exactly
             // the regression class we want to detect.
-            env.storage()
-                .persistent()
-                .extend_ttl(&DataKey::StreamAddr(0), 200_000_u32, 100_000_u32);
+            env.storage().persistent().extend_ttl(
+                &DataKey::StreamAddr(0),
+                200_000_u32,
+                100_000_u32,
+            );
         });
     }));
     assert!(
@@ -145,9 +152,11 @@ fn walker_threshold_eq_extend_to_does_not_panic() {
     // non-panic shape — the TTL behavior is a Soroban host detail.
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         env.as_contract(&factory.address, || {
-            env.storage()
-                .persistent()
-                .extend_ttl(&DataKey::StreamAddr(0), 100_000_u32, 100_000_u32);
+            env.storage().persistent().extend_ttl(
+                &DataKey::StreamAddr(0),
+                100_000_u32,
+                100_000_u32,
+            );
         });
     }));
     assert!(

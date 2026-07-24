@@ -308,7 +308,9 @@ impl DripFactory {
     pub fn protocol_fee_bps(env: Env) -> u32 {
         let governor: Option<Address> = env.storage().instance().get(&DataKey::GovernorAddress);
         match governor {
-            Some(governor) => governance::config(&env, &governor).map(|c| c.fee_bps).unwrap_or(30),
+            Some(governor) => governance::config(&env, &governor)
+                .map(|c| c.fee_bps)
+                .unwrap_or(30),
             None => 30,
         }
     }
