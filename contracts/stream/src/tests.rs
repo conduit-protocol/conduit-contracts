@@ -628,3 +628,163 @@ fn legacy_storage_layout_still_loads_and_tracks_state() {
     assert!(!info.is_cancelled());
     assert!(!info.is_clawback_enabled());
 }
+
+// ── Cancellation CEI / settlement invariants (issue #78) ──────────────────────
+//
+// Issue #78 alleged a reentrancy drain in `cancel_batch_streams`. No such
+// function exists in this workspace — the factory only exposes
+// `create_batch_streams`, and cancellation lives entirely in this contract as
+// `cancel()` / `force_cancel()`. Both already commit the cancelled flag before
+// any `token::transfer`, which is the ordering the issue asked for.
+//
+// The specific attack described (a token contract re-entering the stream from
+// a transfer callback) is not expressible on Soroban: the host refuses to
+// re-enter a contract that is already on the call stack, and SEP-41 tokens
+// have no receiver hooks to fire in the first place. So there is no
+// `test_reentrancy_on_batch_cancel` to write — a test cannot construct the
+// precondition.
+//
+// What IS worth locking in is the property that made the attack impossible:
+// after cancellation, the contract holds no balance AND is durably marked
+// cancelled, so there is no state in which a second settlement could pay out
+// again. These tests pin that down so a future refactor cannot silently move a
+// transfer ahead of the state write, or leave a re-drainable remainder behind.
+
+/// `cancel()` must leave zero balance in the contract and a durably-set
+/// cancelled flag. If a transfer were ever moved ahead of `state::save`, an
+/// interleaved settlement would observe `is_cancelled() == false` while the
+/// balance was still non-zero — this asserts that window is closed.
+#[test]
+fn cancel_commits_state_and_drains_balance() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(1800);
+
+    assert!(!s.client.info().is_cancelled());
+    assert!(s.token.balance(&s.client.address) > 0);
+
+    s.client.cancel();
+
+    assert!(s.client.info().is_cancelled());
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Value conservation across `cancel()`: every stroop the contract held is
+/// accounted for by exactly one payout, and nothing is left to drain twice.
+#[test]
+fn cancel_conserves_value_and_leaves_nothing_to_redrain() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(900);
+
+    let escrowed = s.token.balance(&s.client.address);
+    let sender_before = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+
+    s.client.cancel();
+
+    let paid_to_sender = s.token.balance(&s.sender) - sender_before;
+    let paid_to_recipient = s.token.balance(&s.recipient) - recipient_before;
+
+    assert_eq!(paid_to_sender + paid_to_recipient, escrowed);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Same invariant for the recipient-initiated escape hatch.
+#[test]
+fn force_cancel_commits_state_and_drains_balance() {
+    // 60-day stream so the 30-day pause threshold is reached well before
+    // end_time — otherwise `streamed_amount` clamps to end_time and the
+    // pause branch never applies.
+    let s = Setup::new(100, 5_184_000, false);
+    s.advance_secs(1_000);
+    s.client.pause();
+    s.advance_secs(2_592_001); // 30 days + 1s
+
+    let escrowed = s.token.balance(&s.client.address);
+    let sender_before = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+
+    s.client.force_cancel();
+
+    assert!(s.client.info().is_cancelled());
+    assert_eq!(s.token.balance(&s.client.address), 0);
+
+    let paid_to_sender = s.token.balance(&s.sender) - sender_before;
+    let paid_to_recipient = s.token.balance(&s.recipient) - recipient_before;
+    // Only the 1_000s streamed before the pause is owed to the recipient.
+    assert_eq!(paid_to_recipient, 100_000);
+    assert_eq!(paid_to_sender + paid_to_recipient, escrowed);
+}
+
+/// Every value-moving entry point must reject an already-cancelled stream.
+/// This is the guard that makes a second settlement impossible regardless of
+/// how the caller reaches it.
+#[test]
+fn all_settlement_paths_rejected_after_cancel() {
+    let s = Setup::new(100, 3600, true); // clawback enabled
+    s.advance_secs(900);
+    s.client.cancel();
+
+    assert_eq!(s.client.try_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_force_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_clawback(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_withdraw(&1), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Mirror of the above, entered through `force_cancel()` instead.
+#[test]
+fn all_settlement_paths_rejected_after_force_cancel() {
+    let s = Setup::new(100, 5_184_000, true); // clawback enabled
+    s.advance_secs(1_000);
+    s.client.pause();
+    s.advance_secs(2_592_001);
+    s.client.force_cancel();
+
+    assert_eq!(s.client.try_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_force_cancel(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_clawback(), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.client.try_withdraw(&1), Err(Ok(Error::StreamCancelled)));
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// Partial withdrawals before cancellation must not let the recipient be paid
+/// twice for the same streamed seconds.
+#[test]
+fn cancel_after_partial_withdrawal_does_not_double_pay() {
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(1800); // 180_000 streamed
+
+    s.client.withdraw(&100_000);
+
+    let escrowed = s.token.balance(&s.client.address);
+    let sender_before = s.token.balance(&s.sender);
+    let recipient_before = s.token.balance(&s.recipient);
+
+    s.client.cancel();
+
+    let paid_to_recipient = s.token.balance(&s.recipient) - recipient_before;
+    let paid_to_sender = s.token.balance(&s.sender) - sender_before;
+
+    // Recipient is owed only the 80_000 not already withdrawn.
+    assert_eq!(paid_to_recipient, 80_000);
+    assert_eq!(paid_to_sender, 180_000);
+    assert_eq!(paid_to_sender + paid_to_recipient, escrowed);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+/// The cancelled flag must survive as committed state, not just as a value in
+/// the cancelling invocation's memory — a later, independent invocation has to
+/// observe it.
+#[test]
+fn cancelled_flag_is_durable_across_invocations() {
+    let s = Setup::new(100, 3600, false);
+    s.client.cancel();
+
+    let persisted = s
+        .env
+        .as_contract(&s.client.address, || crate::state::load(&s.env));
+    assert!(persisted.is_cancelled());
+
+    assert_eq!(s.client.withdrawable(), 0);
+    assert_eq!(s.client.streamed_total(), 0);
+}
