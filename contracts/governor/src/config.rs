@@ -23,9 +23,7 @@ pub struct GovernorConfig {
 pub fn load(env: &Env) -> Result<GovernorConfig, Error> {
     let s = env.storage().instance();
 
-    let fee_recipient: Address = s
-        .get(&DataKey::FeeRecipient)
-        .ok_or(Error::NotInitialized)?;
+    let fee_recipient: Address = s.get(&DataKey::FeeRecipient).ok_or(Error::NotInitialized)?;
     let factory_address: Address = s
         .get(&DataKey::FactoryAddress)
         .ok_or(Error::NotInitialized)?;
@@ -34,9 +32,7 @@ pub fn load(env: &Env) -> Result<GovernorConfig, Error> {
         fee_bps: s.get(&DataKey::FeeBps).unwrap_or(30),
         fee_recipient,
         min_duration_seconds: s.get(&DataKey::MinDurationSeconds).unwrap_or(3600),
-        max_duration_seconds: s
-            .get(&DataKey::MaxDurationSeconds)
-            .unwrap_or(315_360_000), // 10 years
+        max_duration_seconds: s.get(&DataKey::MaxDurationSeconds).unwrap_or(315_360_000), // 10 years
         max_rate_per_second: s
             .get(&DataKey::MaxRatePerSecond)
             .unwrap_or(1_000_000_000_000_000),

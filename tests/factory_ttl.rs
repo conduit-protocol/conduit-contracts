@@ -119,9 +119,11 @@ fn extend_ttl_invariant_rejects_threshold_gt_extend_to() {
             // Use the production's own value pair, just inverted, so a future
             // bump to `threshold = 200_000, extend_to = 100_000` here is exactly
             // the regression class we want to detect.
-            env.storage()
-                .persistent()
-                .extend_ttl(&DataKey::StreamAddr(0), 200_000_u32, 100_000_u32);
+            env.storage().persistent().extend_ttl(
+                &DataKey::StreamAddr(0),
+                200_000_u32,
+                100_000_u32,
+            );
         });
     }));
     assert!(
@@ -145,9 +147,11 @@ fn walker_threshold_eq_extend_to_does_not_panic() {
     // non-panic shape — the TTL behavior is a Soroban host detail.
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         env.as_contract(&factory.address, || {
-            env.storage()
-                .persistent()
-                .extend_ttl(&DataKey::StreamAddr(0), 100_000_u32, 100_000_u32);
+            env.storage().persistent().extend_ttl(
+                &DataKey::StreamAddr(0),
+                100_000_u32,
+                100_000_u32,
+            );
         });
     }));
     assert!(
