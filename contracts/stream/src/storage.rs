@@ -1,7 +1,16 @@
 use soroban_sdk::{contracttype, Address};
 
+// Bit-flags packed into `StreamInfo::flags`. Kept `pub` so cross-crate
+// regression tests (e.g. `tests/audit_round_2_regression.rs::pause_resume_*`)
+// and the `info().is_paused()`/`is_cancelled()`/`is_clawback_enabled()` getters
+// can use them, but marked `#[doc(hidden)]` to keep the rustdoc contract API
+// surface clean. Off-chain callers should use the `is_*()` getters rather than
+// reading the bit values directly.
+#[doc(hidden)]
 pub const FLAG_PAUSED: u32 = 1;
+#[doc(hidden)]
 pub const FLAG_CLAWBACK_ENABLED: u32 = 1 << 1;
+#[doc(hidden)]
 pub const FLAG_CANCELLED: u32 = 1 << 2;
 
 #[contracttype]
