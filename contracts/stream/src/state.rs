@@ -1,6 +1,6 @@
 use soroban_sdk::Env;
 
-use crate::storage::{DataKey, StreamInfo, FLAG_CANCELLED, FLAG_PAUSED};
+use crate::storage::{DataKey, StreamInfo, FLAG_CANCELLED, FLAG_CLAWBACK_ENABLED, FLAG_PAUSED};
 use crate::Error;
 
 /// Load the full stream state in a single storage read.
@@ -20,25 +20,26 @@ pub fn load(env: &Env) -> StreamInfo {
     }
 
     // Legacy path: read each field individually (pre-optimisation streams).
-    let sender = s.get(&DataKey::Sender).unwrap();
-    let recipient = s.get(&DataKey::Recipient).unwrap();
-    let token = s.get(&DataKey::Token).unwrap();
-    let rate_per_second = s.get(&DataKey::RatePerSecond).unwrap();
-    let start_time = s.get(&DataKey::StartTime).unwrap();
-    let end_time = s.get(&DataKey::EndTime).unwrap();
-    let withdrawn = s.get(&DataKey::Withdrawn).unwrap_or(0);
-    let paused_at = s.get(&DataKey::PausedAt).unwrap_or(0);
-    let flags = s.get(&DataKey::Flags).unwrap_or(0);
+    // Reconstructs the packed `flags` bitfield from the old dedicated
+    // ClawbackEnabled/Cancelled keys plus the existing Flags key (which
+    // already held the Paused bit before the single-key consolidation).
+    let mut flags: u32 = s.get(&DataKey::Flags).unwrap_or(0);
+    if s.get(&DataKey::ClawbackEnabled).unwrap_or(false) {
+        flags |= FLAG_CLAWBACK_ENABLED;
+    }
+    if s.get(&DataKey::Cancelled).unwrap_or(false) {
+        flags |= FLAG_CANCELLED;
+    }
 
     StreamInfo {
-        sender,
-        recipient,
-        token,
-        rate_per_second,
-        start_time,
-        end_time,
-        withdrawn,
-        paused_at,
+        sender: s.get(&DataKey::Sender).unwrap(),
+        recipient: s.get(&DataKey::Recipient).unwrap(),
+        token: s.get(&DataKey::Token).unwrap(),
+        rate_per_second: s.get(&DataKey::RatePerSecond).unwrap(),
+        start_time: s.get(&DataKey::StartTime).unwrap(),
+        end_time: s.get(&DataKey::EndTime).unwrap(),
+        withdrawn: s.get(&DataKey::Withdrawn).unwrap_or(0),
+        paused_at: s.get(&DataKey::PausedAt).unwrap_or(0),
         flags,
     }
 }

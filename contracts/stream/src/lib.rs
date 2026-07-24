@@ -81,9 +81,9 @@ impl DripStream {
                 rate_per_second,
                 start_time,
                 end_time,
+                flags,
                 withdrawn: 0,
                 paused_at: 0,
-                flags,
             },
         );
     }
@@ -230,15 +230,22 @@ impl DripStream {
     }
 
     /// Sender deposits additional tokens into the stream.
+    ///
+    /// Auth is checked immediately after the minimal state load needed to
+    /// know `sender` -- before `ttl::bump` (a storage write) or the
+    /// cancellation check -- so an unauthenticated call fails as cheaply
+    /// as possible instead of paying for storage-extension instructions
+    /// it never needed.
     pub fn top_up(env: Env, amount: i128) -> Result<(), Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        ttl::bump(&env);
 
         let info = state::load(&env);
-        state::assert_not_cancelled(&info)?;
         info.sender.require_auth();
+
+        ttl::bump(&env);
+        state::assert_not_cancelled(&info)?;
 
         let tk = token::Client::new(&env, &info.token);
         let contract_addr = env.current_contract_address();
